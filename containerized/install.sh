@@ -129,6 +129,19 @@ chmod +x "$WRAPPER_BIN"
 ok "Wrapper installed at $WRAPPER_BIN"
 
 # ---------------------------------------------------------------------------
+# 6b. Symlink the iTerm2 workspace launcher into ~/.local/bin/ so it's
+#     directly invokable from any shell (gc-workspace.sh).
+# ---------------------------------------------------------------------------
+WORKSPACE_SRC="$(cd "$(dirname "$0")/../scripts/gascity-docker-workspace.sh" && pwd)"
+WORKSPACE_BIN="$HOME/.local/bin/gc-workspace.sh"
+if [ -f "$WORKSPACE_SRC" ]; then
+    ln -sf "$WORKSPACE_SRC" "$WORKSPACE_BIN"
+    ok "Workspace launcher symlinked at $WORKSPACE_BIN → $WORKSPACE_SRC"
+else
+    warn "workspace launcher not found at $WORKSPACE_SRC — skipping symlink"
+fi
+
+# ---------------------------------------------------------------------------
 # 7. Verify
 # ---------------------------------------------------------------------------
 if [ "$DO_VERIFY" -eq 1 ]; then
@@ -156,12 +169,20 @@ cat <<EOF
        gc-docker supervisor run  # foreground supervisor — agents in containers
        gc-docker init ~/test     # any gc subcommand works through the wrapper
 
+   For day-to-day use, the iTerm2 workspace launcher gives you the
+   supervisor + shell + events feed in one window with a desert color
+   scheme so you can't mix it up with the local one:
+
+       gc-workspace.sh           # plain feed
+       gc-workspace.sh --ai      # bottom pane runs gc-feed-ai
+
    Make sure $(dirname "$WRAPPER_BIN") is on your PATH so 'gc-docker'
-   resolves. (It already is if 'gc' resolves, since gc lives in the same
-   dir for most installs.)
+   and 'gc-workspace.sh' resolve. (It already is if 'gc' resolves,
+   since gc lives in the same dir for most installs.)
 
    Verify:
        which gc-docker           # should print $WRAPPER_BIN
+       which gc-workspace.sh     # should print $HOME/.local/bin/gc-workspace.sh
        which claude              # should still be your normal claude
 
    To remove this setup:  ./uninstall.sh

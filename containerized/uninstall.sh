@@ -21,15 +21,15 @@ say()  { printf '\e[1;36m→\e[0m %s\n' "$*"; }
 ok()   { printf '\e[1;32m✓\e[0m %s\n' "$*"; }
 warn() { printf '\e[1;33m⚠\e[0m %s\n' "$*"; }
 
-# Shim + symlinks + wrapper
-say "Removing shim and wrapper"
+# Shim + symlinks + wrapper + workspace launcher symlink
+say "Removing shim, wrapper, and workspace launcher"
 rm -f "$SHIM_BIN_DIR/gc-docker-runner" \
       "$SHIM_BIN_DIR/claude" \
       "$SHIM_BIN_DIR/codex" \
       "$SHIM_BIN_DIR/gemini"
 rmdir "$SHIM_BIN_DIR" 2>/dev/null || true
-rm -f "$WRAPPER_BIN"
-ok "Shim and wrapper removed"
+rm -f "$WRAPPER_BIN" "$HOME/.local/bin/gc-workspace.sh"
+ok "Shim, wrapper, and workspace launcher removed"
 
 # Shell rc cleanup — strip any leftover marker-fenced PATH block.
 detect_rc() {

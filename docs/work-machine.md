@@ -80,36 +80,51 @@ grep learning-gascity ~/.zshrc || echo "(clean)"
 
 ## Daily use
 
-You explicitly type `gc-docker` when you want sandboxed agents. Anything
-else stays on the host.
+One command (`install.sh` symlinks the launcher to `~/.local/bin/`):
 
 ```bash
-gc <anything>             # normal local gc — agents on host (rare on a work machine)
-claude --continue         # your normal claude, untouched
-
-gc-docker init ~/work-city          # init goes to normal gc; harmless
-cd ~/work-city
-gc-docker rig add ~/code/some-repo  # add a rig
-bd create "do a thing"              # bd is on PATH directly — no wrapper needed
-gc-docker supervisor run            # foreground supervisor with sandboxed agents
+gc-workspace.sh        # plain feed
+gc-workspace.sh --ai   # feed via Ollama summary
 ```
 
-When the supervisor spawns an agent, you'll see a container appear in
-`docker ps` named `gc-<agent>-<bead>`. When the agent exits, the
-container exits and is removed (we use `docker run --rm`).
+Opens an iTerm2 window with three panes, all painted in a desert
+color scheme so you can't mistake it for the local workspace:
+
+| Pane | What it runs |
+|---|---|
+| Left tall | `gc-docker supervisor run` (foreground supervisor; agents spawn in containers) |
+| Top right | shell, cd'd to the city — type `gc session attach mayor`, `bd create "…"`, `gc-docker rig add …` here |
+| Bottom right | `gc events --follow` (or `gc-feed-ai` with `--ai`) |
+
+The first time you run it, the script auto-initializes a city at
+`$HOME/gc-docker` (override with `GC_DOCKER_CITY=…`). On subsequent
+runs it just reuses what's there.
 
 ### Watching agent activity
 
-```bash
-docker ps                                       # live containers
-ls -lt ~/.local/state/gascity-docker-runner/logs/  # session logs (teed by the shim)
-gc-docker events --follow                       # live event stream
-```
+When the supervisor spawns an agent, a container appears in `docker ps`
+named `gc-<agent>-<bead>`. When the agent exits, the container is
+removed (we use `docker run --rm`). Session logs are teed by the shim
+to `~/.local/state/gascity-docker-runner/logs/<session-id>.log`.
 
 ### Stopping cleanly
 
-In the foreground supervisor terminal: Ctrl-C. The shim forwards
-SIGTERM into each agent container with a 10-second grace period.
+Ctrl-C in the supervisor pane. The shim forwards SIGTERM into each
+agent container with a 10-second grace period.
+
+### Bare commands (no workspace)
+
+```bash
+gc-docker init ~/work-city          # any path
+cd ~/work-city
+gc-docker rig add ~/code/some-repo  # add a rig
+bd create "do a thing"              # bd is on PATH directly — no wrapper needed
+gc-docker supervisor run            # foreground supervisor
+
+# Anything outside gc:
+gc <anything>                       # normal local gc — agents on host (rare on a work machine)
+claude --continue                   # your normal claude, untouched
+```
 
 ---
 
