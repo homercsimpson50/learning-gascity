@@ -61,6 +61,15 @@ def claude_log_dir(work_dir: str) -> str:
 NOISE_ACTORS = {"cache-reconcile"}
 NOISE_TYPES = {"controller.heartbeat"}
 
+# Claude tool calls to suppress in the events log AND in the AI summary
+# buffer (Claude Code's subagent-tracking internals — pure noise to a human
+# watching what an agent is *doing*).
+NOISE_CLAUDE_TYPES = {
+    "tool.Task", "tool.TaskStart", "tool.TaskStop", "tool.TaskList",
+    "tool.Monitor", "tool.SendMessage", "tool.TaskGet",
+    "tool.TaskUpdate", "tool.TaskOutput", "tool.TaskCreate",
+}
+
 SUMMARY_PROMPT = (
     "You are summarizing live activity from a multi-agent coding system "
     "(Gas City). Below are recent events: agent tool calls (Bash, Read, "
@@ -526,11 +535,13 @@ class GCFeedApp(App):
         if flush:
             self.event_buf.clear()
             self.events_since_summary = 0
+            self.todos = []
             try:
                 self.query_one("#events", RichLog).clear()
                 self.query_one("#summary", RichLog).clear()
             except Exception:
                 pass
+            self._render_todos()
 
         # Decide which dirs to watch.
         dirs_to_watch: List[str] = []
@@ -583,10 +594,10 @@ class GCFeedApp(App):
             for rec in records:
                 self.claude_seen += 1
                 self._maybe_update_todos(rec)
-                # Choose actor name: dir-encoded path is the cwd. For HQ that's
-                # mayor; for other rigs default to that rig's name.
                 actor = self._actor_for_path(path)
                 for ev in claude_to_events(rec, default_actor=actor):
+                    if ev.get("type") in NOISE_CLAUDE_TYPES:
+                        continue
                     log.write(fmt_claude_event(ev))
                     self.event_buf.append(ev)
                     self.events_since_summary += 1
@@ -634,9 +645,24 @@ class GCFeedApp(App):
         self._update_focus_styles()
 
     def action_select_rig(self) -> None:
+        # Enter still works as an explicit re-select (forces a flush).
         if self.focused_panel != "rigs":
             return
         path, label = self._highlighted_rig()
+        self._spawn(self._switch_rig(path, label, flush=True))
+
+    def on_data_table_row_highlighted(self, event) -> None:
+        """Auto-switch scope as soon as the cursor lands on a row in the
+        rigs table — no Enter required."""
+        try:
+            if event.data_table.id != "rigs":
+                return
+        except Exception:
+            return
+        path, label = self._highlighted_rig()
+        # Avoid redundant switches when the highlighted rig hasn't changed.
+        if path == self.current_rig_path and label == self.current_rig_label:
+            return
         self._spawn(self._switch_rig(path, label, flush=True))
 
     def action_scroll_or_move(self, direction: int) -> None:
@@ -818,7 +844,11 @@ class GCFeedApp(App):
         except Exception:
             return
         if not self.todos:
-            w.update("[dim]no TodoWrite seen yet[/dim]")
+            w.update(
+                "[b]Todos[/b] [dim](agent's TodoWrite tool)[/dim]\n"
+                f"[dim]scope: {self.current_rig_label}[/dim]\n"
+                "[dim]waiting for the active agent to call TodoWrite…[/dim]"
+            )
             return
         lines = ["[b]Mayor's todos[/b]"]
         for t in self.todos[:14]:
