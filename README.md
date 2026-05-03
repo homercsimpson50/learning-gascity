@@ -103,4 +103,5 @@ learning-gascity/
 - Upstream Gas City: <https://github.com/gastownhall/gascity>
 - Sibling repo for Gas Town: <https://github.com/homercsimpson50/learning-gastown>
 - Spec: [`docs/containerizing-gascity-for-local-use-spec.md`](docs/containerizing-gascity-for-local-use-spec.md)
+- **Model picks per agent (cost optimization, Bedrock cutover notes):** [`docs/model-selection.md`](docs/model-selection.md)
 - Editing this repo with Claude Code: [`CLAUDE.md`](CLAUDE.md)

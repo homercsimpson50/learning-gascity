@@ -48,6 +48,7 @@ Upstream fixes need a `gc` binary upgrade — not edits here.
 - [`docs/personal-laptop.md`](docs/personal-laptop.md) — user how-to: local install, daily commands, troubleshooting.
 - [`docs/work-machine.md`](docs/work-machine.md) — user how-to: containerized install, daily commands, troubleshooting.
 - [`docs/containerizing-gascity-for-local-use-spec.md`](docs/containerizing-gascity-for-local-use-spec.md) — design spec the containerized path implements.
+- [`docs/model-selection.md`](docs/model-selection.md) — per-agent model tier choices (Haiku/Sonnet/Opus), where Opus is worth it, and Bedrock-cutover wiring notes.
 - [`containerized/README.md`](containerized/README.md) — directory reference for `containerized/` (architecture, hard rules, config knobs, v1 limitations).
 - [`bootstrap.sh`](bootstrap.sh) — brand-new-machine entry for the work-machine path. Installs gc/bd/dolt/flock then hands off to `containerized/install.sh`.
 - [`upgrade.sh`](upgrade.sh) — bring everything up to date. Pulls the repo, upgrades `gc` / `bd` / `dolt` from upstream, rebuilds the agent image, refreshes the shim + workspace launchers. Idempotent.
