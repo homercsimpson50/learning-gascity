@@ -18,7 +18,16 @@
 #   ./gascity-workspace-work.sh --raw   # raw JSON event stream
 
 set -euo pipefail
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Resolve symlinks so SCRIPT_DIR points at the real scripts/ dir (this file
+# is typically reached via ~/.local/bin/gc-workspace-work.sh → scripts/…).
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+    DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null && pwd)"
+    SOURCE="$(readlink "$SOURCE")"
+    [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null && pwd)"
 
 if [ -t 1 ]; then BOLD=$'\033[1m'; GREEN=$'\033[0;32m'; NC=$'\033[0m'; else BOLD=''; GREEN=''; NC=''; fi
 

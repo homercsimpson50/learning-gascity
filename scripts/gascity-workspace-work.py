@@ -8,7 +8,9 @@ import os
 import subprocess
 import sys
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+# Resolve symlinks so SCRIPT_DIR points at the real scripts/ dir
+# (typically reached via ~/.local/bin/gc-workspace-work.py → scripts/…).
+SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 
 
 def main() -> int:
