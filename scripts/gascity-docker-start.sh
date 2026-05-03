@@ -65,17 +65,22 @@ if [ ! -f "$CITY/city.toml" ]; then
 fi
 mkdir -p "$(dirname "$LOG_FILE")"
 
-# --- Step 1: stop any existing supervisor ----------------------------------
+# --- Step 1: stop any existing supervisor (local launchd OR previous docker) -
+# There can only be one supervisor on the machine. Whichever one is up
+# right now — local (launchd) or a previous shim-aware backgrounded one —
+# we stop it first so we can start a fresh shim-aware one.
 if gc supervisor status 2>/dev/null | grep -q running; then
-    echo "${YELLOW}→${NC} stopping existing supervisor (was running on host)"
+    echo "${YELLOW}→${NC} stopping existing supervisor (was running)"
     gc supervisor stop 2>&1 | sed 's/^/    /'
 fi
-# Also kill any backgrounded one we spawned previously.
 if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
     kill "$(cat "$PIDFILE")" 2>/dev/null || true
     sleep 1
-    rm -f "$PIDFILE"
 fi
+rm -f "$PIDFILE"
+# Belt-and-braces: any stray 'gc supervisor run' processes (could be a
+# leftover from a hung previous run).
+pgrep -f 'gc supervisor run' 2>/dev/null | xargs -r kill 2>/dev/null || true
 
 # --- Step 2: start gc supervisor with shim PATH in background --------------
 echo "${GREEN}→${NC} starting shim-aware supervisor"

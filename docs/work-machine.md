@@ -109,8 +109,30 @@ to `~/.local/state/gascity-docker-runner/logs/<session-id>.log`.
 
 ### Stopping cleanly
 
-Ctrl-C in the supervisor pane. The shim forwards SIGTERM into each
-agent container with a 10-second grace period.
+```bash
+gc-docker-stop.sh                  # graceful stop of the Docker supervisor
+gc-docker-stop.sh --force          # SIGKILL after 10s if it won't exit
+gc-docker-stop.sh --restart-local  # ...and bring your local supervisor back up
+```
+
+Ctrl-C in the supervisor pane works too, but `gc-docker-stop.sh` is
+idempotent and the cleanest swap-back path.
+
+### Swapping between local and docker
+
+You can only run one supervisor at a time per machine. Both start
+scripts know about each other and will swap cleanly:
+
+```bash
+# Sitting in local mode, want to test docker:
+gc-docker-start.sh    # auto-stops local first, then brings docker up
+
+# Done with docker, want local back:
+gc-docker-stop.sh --restart-local
+
+# Or skip the wrapper script and let gascity-start.sh swap for you:
+~/code/learning-gascity/scripts/gascity-start.sh   # auto-stops docker first
+```
 
 ### Bare commands (no workspace)
 

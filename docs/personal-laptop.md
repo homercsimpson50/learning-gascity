@@ -126,6 +126,29 @@ gc supervisor status            # is the supervisor up?
 gc supervisor stop              # stop everything
 ```
 
+### Stop / start helpers
+
+```bash
+~/code/learning-gascity/scripts/gascity-stop.sh         # clean stop
+~/code/learning-gascity/scripts/gascity-start.sh        # bring back up
+```
+
+### Swapping with the work-machine (Docker) flow on the same laptop
+
+If you're occasionally testing the containerized setup
+([work-machine.md](work-machine.md)) on this same machine, the start
+scripts know about each other and will swap cleanly:
+
+```bash
+# Sitting in local mode, want to test docker:
+gc-docker-start.sh                       # auto-stops local first, then brings docker up
+
+# Done with docker, want local back:
+gc-docker-stop.sh --restart-local        # one command, both halves
+# or:
+~/code/learning-gascity/scripts/gascity-start.sh   # also auto-stops docker first
+```
+
 ---
 
 ## Troubleshooting

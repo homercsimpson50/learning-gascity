@@ -129,17 +129,29 @@ chmod +x "$WRAPPER_BIN"
 ok "Wrapper installed at $WRAPPER_BIN"
 
 # ---------------------------------------------------------------------------
-# 6b. Symlink the iTerm2 workspace launcher into ~/.local/bin/ so it's
-#     directly invokable from any shell (gc-workspace.sh).
+# 6b. Symlink the docker workspace + start/stop scripts into ~/.local/bin/
+#     so they're directly invokable as gc-workspace.sh, gc-docker-start.sh,
+#     and gc-docker-stop.sh from any shell.
 # ---------------------------------------------------------------------------
-WORKSPACE_SRC="$(cd "$(dirname "$0")/../scripts/gascity-docker-workspace.sh" && pwd)"
-WORKSPACE_BIN="$HOME/.local/bin/gc-workspace.sh"
-if [ -f "$WORKSPACE_SRC" ]; then
-    ln -sf "$WORKSPACE_SRC" "$WORKSPACE_BIN"
-    ok "Workspace launcher symlinked at $WORKSPACE_BIN → $WORKSPACE_SRC"
-else
-    warn "workspace launcher not found at $WORKSPACE_SRC — skipping symlink"
-fi
+SCRIPTS_DIR="$(cd "$(dirname "$0")/../scripts" && pwd)"
+mkdir -p "$HOME/.local/bin"
+for src in gascity-docker-workspace.sh gascity-docker-start.sh gascity-docker-stop.sh; do
+    if [ -f "$SCRIPTS_DIR/$src" ]; then
+        # Symlink names: drop the `gascity-` prefix (so 'gc-workspace.sh',
+        # 'gc-docker-start.sh', 'gc-docker-stop.sh').
+        link_name="${src#gascity-}"
+        # Keep workspace as gc-workspace.sh (no 'docker-' prefix; only one workspace flavor lives in ~/.local/bin).
+        if [ "$src" = gascity-docker-workspace.sh ]; then
+            link_name="gc-workspace.sh"
+        else
+            link_name="gc-${src#gascity-}"
+        fi
+        ln -sf "$SCRIPTS_DIR/$src" "$HOME/.local/bin/$link_name"
+        ok "Symlinked ~/.local/bin/$link_name → $SCRIPTS_DIR/$src"
+    else
+        warn "$SCRIPTS_DIR/$src missing — skipping"
+    fi
+done
 
 # ---------------------------------------------------------------------------
 # 7. Verify

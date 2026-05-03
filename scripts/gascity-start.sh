@@ -73,7 +73,16 @@ if [ "$ENABLE_LAUNCHD" -eq 1 ]; then
     fi
 fi
 
-# 2. Start the supervisor (idempotent).
+# 2a. If a shim-aware (Docker) supervisor is running, stop it first.
+# There's only one supervisor per machine, and the Docker one is run
+# as a backgrounded process tracked at this pidfile.
+DOCKER_PIDFILE="$HOME/.local/state/gascity-docker-runner/supervisor.pid"
+if [ -f "$DOCKER_PIDFILE" ] && kill -0 "$(cat "$DOCKER_PIDFILE" 2>/dev/null)" 2>/dev/null; then
+    step "Stopping Docker supervisor (was running) so local can start"
+    "$SCRIPT_DIR/gascity-docker-stop.sh" 2>&1 | sed 's/^/    /' || true
+fi
+
+# 2b. Start the local supervisor (idempotent).
 if gc supervisor status >/dev/null 2>&1; then
     ok "supervisor already running"
 else

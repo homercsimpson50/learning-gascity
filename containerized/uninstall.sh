@@ -28,8 +28,11 @@ rm -f "$SHIM_BIN_DIR/gc-docker-runner" \
       "$SHIM_BIN_DIR/codex" \
       "$SHIM_BIN_DIR/gemini"
 rmdir "$SHIM_BIN_DIR" 2>/dev/null || true
-rm -f "$WRAPPER_BIN" "$HOME/.local/bin/gc-workspace.sh"
-ok "Shim, wrapper, and workspace launcher removed"
+rm -f "$WRAPPER_BIN" \
+      "$HOME/.local/bin/gc-workspace.sh" \
+      "$HOME/.local/bin/gc-docker-start.sh" \
+      "$HOME/.local/bin/gc-docker-stop.sh"
+ok "Shim, wrapper, workspace, and start/stop launchers removed"
 
 # Shell rc cleanup — strip any leftover marker-fenced PATH block.
 detect_rc() {
