@@ -2,14 +2,14 @@
 """
 Gas City iTerm2 Workspace Launcher
 
-Layout (matches the gastown layout, but with gascity):
-  ┌──────────┬──────────┬──────────┐
-  │          │ gc       │ shell    │
-  │  local   │ mayor    │ ~/code   │
-  │  mayor   │ (cont)   │          │
-  │  (tall)  ├──────────┴──────────┤
-  │          │ gc events --follow  │
-  │          │ (wide)              │
+Layout:
+  ┌──────────┬─────────────────────┐
+  │          │ shell (interactive) │
+  │  local   │                     │
+  │  mayor   │                     │
+  │  (tall)  ├─────────────────────┤
+  │          │ feed (wide)         │
+  │          │                     │
   └──────────┴─────────────────────┘
 
 Usage:
@@ -26,18 +26,17 @@ import os
 import sys
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-CONTAINER_DIR = os.path.expanduser("~/code/learning-gascity/containerized")
 
 USE_AI = "--ai" in sys.argv
+
+if USE_AI and not os.access(os.path.join(SCRIPT_DIR, "gc-feed-ai"), os.X_OK):
+    print(f"error: {SCRIPT_DIR}/gc-feed-ai not found or not executable", file=sys.stderr)
+    sys.exit(1)
 
 LOCAL_MAYOR = (
     'cd ~/gc && echo "Starting local Gas City..." '
     '&& gc supervisor start 2>/dev/null; gc session attach mayor'
 )
-CONTAINER_MAYOR = (
-    f'cd {CONTAINER_DIR} && docker compose exec gascity gc session attach mayor'
-)
-CODE_SHELL = 'cd ~/code'
 EVENT_FEED = (
     f'cd ~/gc && {SCRIPT_DIR}/gc-feed-ai'
     if USE_AI
@@ -53,13 +52,9 @@ async def main(connection):
     left = window.current_tab.current_session
     await left.async_set_name("local-mayor")
 
-    # Split left vertically → right half
+    # Split left vertically → right top (shell)
     right_top = await left.async_split_pane(vertical=True)
-    await right_top.async_set_name("gc-mayor")
-
-    # Split right-top vertically → top-right (shell)
-    top_right = await right_top.async_split_pane(vertical=True)
-    await top_right.async_set_name("code")
+    await right_top.async_set_name("shell")
 
     # Split right-top horizontally down → bottom-right (feed, wide)
     bottom_right = await right_top.async_split_pane(vertical=False)
@@ -67,11 +62,9 @@ async def main(connection):
 
     await asyncio.sleep(0.5)
 
-    # Send commands
+    # Top-right pane is left blank (just an open shell).
     await left.async_send_text(LOCAL_MAYOR + '\n')
-    await right_top.async_send_text(CONTAINER_MAYOR + '\n')
-    await top_right.async_send_text(CODE_SHELL + '\n')
-    await asyncio.sleep(1)
+    await asyncio.sleep(0.5)
     await bottom_right.async_send_text(EVENT_FEED + '\n')
 
 

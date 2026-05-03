@@ -88,18 +88,20 @@ This had to be done once on this host.
 
 ### iTerm2 workspace layout (`scripts/gascity-workspace.{sh,py}`)
 
-Cloned from `~/code/learning-gastown/scripts/gastown-workspace.{sh,py}` with
-gascity commands substituted:
+Three panes, simpler than the gastown 4-pane original:
 
 - Left tall pane: `cd ~/gc && gc supervisor start; gc session attach mayor`
-- Top-mid pane: `docker compose exec gascity gc session attach mayor` (the
-  containerized city — only useful if `containerized/` is also up)
-- Top-right pane: plain shell at `~/code`
-- Bottom wide pane: `gc events --follow` (or `gc-feed-ai` with `--ai`)
+- Top-right pane: blank interactive shell — no command sent
+- Bottom-right pane: `gc events --follow` (or `gc-feed-ai` with `--ai`)
 
 Both scripts produce the same layout — `.sh` uses AppleScript via
 `osascript`, `.py` uses the iTerm2 Python API (which must be enabled in
 iTerm2 → Preferences → General → Magic). Both accept `--ai`.
+
+**`SCRIPT_DIR` resolution**: the `.sh` deliberately uses `${BASH_SOURCE[0]}`
+not `$0`, so it works even if accidentally sourced (when sourced, `$0` is
+the parent shell's argv[0] and `dirname` gives a wrong dir, which produced
+a silent path bug in an earlier revision).
 
 ### `scripts/gc-feed-ai` (the "--ai" feed)
 

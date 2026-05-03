@@ -1,0 +1,14 @@
+# gc-feed-ai config — copy to ~/.gc-feed-ai.conf and uncomment what you
+# want to override. Real env vars still take precedence over this file.
+
+# Ollama model to use for summaries.
+# GC_FEED_AI_MODEL=qwen2.5:3b
+
+# Summarize at least every N seconds (lower = more frequent recaps).
+# GC_FEED_AI_INTERVAL=15
+
+# Summarize after every N events (whichever fires first).
+# GC_FEED_AI_EVERY=8
+
+# Ollama HTTP endpoint.
+# OLLAMA_URL=http://localhost:11434

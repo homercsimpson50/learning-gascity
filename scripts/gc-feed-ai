@@ -18,16 +18,43 @@
 #   ./gc-feed-ai --city ~/gc    # explicit city
 #   ./gc-feed-ai --no-ai        # plain pass-through (skip Ollama, sanity test)
 #
+# Config:
+#   ~/.gc-feed-ai.conf  sourced if present. Set any of the env knobs
+#                       below as plain shell assignments. Real env vars
+#                       still override the file.
+#
 # Env knobs (match gtc conventions):
 #   GC_FEED_AI_MODEL    default qwen2.5:3b
 #   GC_FEED_AI_EVERY    summarize every N events (default 8)
-#   GC_FEED_AI_INTERVAL summarize at least every T seconds (default 45)
+#   GC_FEED_AI_INTERVAL summarize at least every T seconds (default 15)
 #   OLLAMA_URL          default http://localhost:11434
 
 set -euo pipefail
 
+# Source user config if present. Real env vars take precedence: we snapshot
+# anything already set, source the file (which sets defaults), then restore
+# the snapshot so explicit env wins over config-file values.
+CONFIG_FILE="${GC_FEED_AI_CONFIG:-$HOME/.gc-feed-ai.conf}"
+if [ -f "$CONFIG_FILE" ]; then
+    _gcfa_pre_model="${GC_FEED_AI_MODEL:-}"
+    _gcfa_pre_every="${GC_FEED_AI_EVERY:-}"
+    _gcfa_pre_interval="${GC_FEED_AI_INTERVAL:-}"
+    _gcfa_pre_url="${OLLAMA_URL:-}"
+    _gcfa_pre_disable="${GC_FEED_AI_DISABLE:-}"
+    # shellcheck disable=SC1090
+    . "$CONFIG_FILE"
+    [ -n "$_gcfa_pre_model" ]    && GC_FEED_AI_MODEL="$_gcfa_pre_model"
+    [ -n "$_gcfa_pre_every" ]    && GC_FEED_AI_EVERY="$_gcfa_pre_every"
+    [ -n "$_gcfa_pre_interval" ] && GC_FEED_AI_INTERVAL="$_gcfa_pre_interval"
+    [ -n "$_gcfa_pre_url" ]      && OLLAMA_URL="$_gcfa_pre_url"
+    [ -n "$_gcfa_pre_disable" ]  && GC_FEED_AI_DISABLE="$_gcfa_pre_disable"
+    unset _gcfa_pre_model _gcfa_pre_every _gcfa_pre_interval _gcfa_pre_url _gcfa_pre_disable
+fi
+
 MODEL="${GC_FEED_AI_MODEL:-qwen2.5:3b}"
 OLLAMA_URL="${OLLAMA_URL:-http://localhost:11434}"
+GC_FEED_AI_EVERY="${GC_FEED_AI_EVERY:-8}"
+GC_FEED_AI_INTERVAL="${GC_FEED_AI_INTERVAL:-15}"
 
 if [ -t 1 ]; then
     GREEN=$'\033[0;32m'; RED=$'\033[0;31m'; YELLOW=$'\033[0;33m'
@@ -95,7 +122,7 @@ cleanup() {
 
 if [ "$NO_AI" -eq 0 ]; then
     if ensure_ollama; then
-        echo "  ${GREEN}AI summary on${NC} (model=${MODEL}, every=${GC_FEED_AI_EVERY:-8} events / ${GC_FEED_AI_INTERVAL:-45}s)"
+        echo "  ${GREEN}AI summary on${NC} (model=${MODEL}, every=${GC_FEED_AI_EVERY} events / ${GC_FEED_AI_INTERVAL}s)"
         trap cleanup EXIT INT TERM
     else
         NO_AI=1
@@ -109,4 +136,6 @@ SUMMARIZER="$SCRIPT_DIR/_gc_feed_ai.py"
 export GC_FEED_AI_MODEL="$MODEL"
 export OLLAMA_URL="$OLLAMA_URL"
 export GC_FEED_AI_DISABLE="$NO_AI"
+export GC_FEED_AI_EVERY
+export GC_FEED_AI_INTERVAL
 exec gc events --follow ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"} | "$SUMMARIZER"

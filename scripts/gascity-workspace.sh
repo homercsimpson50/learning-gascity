@@ -2,20 +2,19 @@
 #
 # Gas City iTerm2 Workspace Launcher
 #
-# Layout (matches the gastown-workspace.sh layout, but with gascity):
-#   ┌──────────┬──────────┬──────────┐
-#   │          │ gc       │ shell    │
-#   │  local   │ mayor    │ ~/code   │
-#   │  mayor   │ (cont)   │          │
-#   │  (tall)  ├──────────┴──────────┤
-#   │          │ gc events --follow  │
-#   │          │ (wide)              │
+# Layout:
+#   ┌──────────┬─────────────────────┐
+#   │          │ shell (interactive) │
+#   │  local   │                     │
+#   │  mayor   │                     │
+#   │  (tall)  ├─────────────────────┤
+#   │          │ feed (wide)         │
+#   │          │                     │
 #   └──────────┴─────────────────────┘
 #
-# Left tall pane:   local gc mayor in ~/gc
-# Top-mid pane:     containerized gc mayor (docker compose exec)
-# Top-right pane:   plain shell in ~/code
-# Bottom-wide pane: live event feed for the local city
+# Left tall pane:    local gc mayor in ~/gc (gc session attach mayor)
+# Top-right pane:    blank interactive shell — no command sent
+# Bottom-right pane: gc events --follow (or gc-feed-ai with --ai)
 #
 # Usage:
 #   ./gascity-workspace.sh          # Plain feed in the bottom pane
@@ -23,17 +22,21 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-CONTAINER_DIR="$HOME/code/learning-gascity/containerized"
+# Use BASH_SOURCE[0] not $0 so SCRIPT_DIR is correct even when this file
+# is `source`d (then $0 is the parent shell's argv[0]).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 USE_AI=0
 if [ "${1:-}" = "--ai" ]; then
     USE_AI=1
 fi
 
-LOCAL_MAYOR='cd ~/gc && echo "Starting local Gas City..." && gc supervisor start 2>/dev/null; gc session attach mayor'
-CONTAINER_MAYOR="cd $CONTAINER_DIR && docker compose exec gascity gc session attach mayor"
-CODE_SHELL='cd ~/code'
+if [ "$USE_AI" -eq 1 ] && [ ! -x "$SCRIPT_DIR/gc-feed-ai" ]; then
+    echo "error: $SCRIPT_DIR/gc-feed-ai not found or not executable" >&2
+    exit 1
+fi
+
+LOCAL_MAYOR="cd ~/gc && echo 'Starting local Gas City...' && gc supervisor start 2>/dev/null; gc session attach mayor"
 if [ "$USE_AI" -eq 1 ]; then
     EVENT_FEED="cd ~/gc && $SCRIPT_DIR/gc-feed-ai"
 else
@@ -52,32 +55,19 @@ tell application "iTerm2"
             set rightPane to (split vertically with default profile)
         end tell
 
-        -- Step 2: Split right into top-right | bottom-right (feed)
+        -- Step 2: Split right horizontally → top-right (shell) and bottom-right (feed)
         tell rightPane
+            set name to "shell"
             set feedPane to (split horizontally with default profile)
         end tell
 
-        -- Step 3: Split top-right into gc-mayor | shell
-        tell rightPane
-            set name to "gc-mayor"
-            set shellPane to (split vertically with default profile)
-        end tell
-
-        tell shellPane
-            set name to "code"
-        end tell
         tell feedPane
             set name to "feed"
         end tell
 
+        -- Send commands. Top-right pane is left blank (just an open shell).
         tell current session
             write text "$LOCAL_MAYOR"
-        end tell
-        tell rightPane
-            write text "$CONTAINER_MAYOR"
-        end tell
-        tell shellPane
-            write text "$CODE_SHELL"
         end tell
         tell feedPane
             write text "$EVENT_FEED"

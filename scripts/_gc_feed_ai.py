@@ -26,7 +26,7 @@ from typing import Optional, Tuple, List
 MODEL = os.environ.get("GC_FEED_AI_MODEL", "qwen2.5:3b")
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 EVERY = int(os.environ.get("GC_FEED_AI_EVERY", "8"))
-INTERVAL = int(os.environ.get("GC_FEED_AI_INTERVAL", "45"))
+INTERVAL = int(os.environ.get("GC_FEED_AI_INTERVAL", "15"))
 DISABLED = os.environ.get("GC_FEED_AI_DISABLE", "0") == "1"
 BUF_MAX = 40
 
