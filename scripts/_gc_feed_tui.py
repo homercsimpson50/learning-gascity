@@ -60,11 +60,18 @@ def claude_log_dir(city_dir: str) -> str:
 NOISE_ACTORS = {"cache-reconcile"}
 NOISE_TYPES = {"controller.heartbeat"}
 
-# Prompt copied from the gastown feat/agent-observability-tui branch.
+# Prompt: same shape as gastown feat/agent-observability-tui, tuned for the
+# Claude-Code-conversation-heavy event stream we get here. The events list
+# now includes "user" prompts and "mayor" tool/text/thinking lines, so the
+# summary should describe the conversation, not just supervisor metadata.
 SUMMARY_PROMPT = (
-    "Summarize these software agent events in 1-2 SHORT sentences. "
-    "Max 30 words. Say WHO is doing WHAT. No filler. No markdown formatting.\n\n"
-    "Events:\n{events}\n\nSummary:"
+    "You are summarizing a live multi-agent coding session (Gas City). "
+    "Below are recent events: user prompts, mayor (the lead agent) "
+    "responses and tool calls, plus supervisor lifecycle events. "
+    "Write a 2-3 sentence summary of WHAT THE USER AND MAYOR ARE WORKING ON "
+    "RIGHT NOW. Mention specific topics or files when present. "
+    "Be concrete. No filler, no markdown.\n\n"
+    "Events (oldest to newest):\n{events}\n\nSummary:"
 )
 
 
@@ -130,9 +137,64 @@ def _truncate(s: str, n: int = 80) -> str:
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
-def claude_to_event(rec: dict) -> Optional[dict]:
-    """Translate a Claude Code session-log record into our event-dict shape so
-    it can flow through the same renderer + summary buffer as gc events."""
+def _block_to_event(ts: str, actor: str, c: dict) -> Optional[dict]:
+    """Translate one content block into an event dict. Returns None for blocks
+    we don't care to surface (e.g. unsupported variants)."""
+    if not isinstance(c, dict):
+        return None
+    ct = c.get("type")
+    if ct == "tool_use":
+        tool = c.get("name", "tool")
+        inp = c.get("input") or {}
+        if tool == "Bash":
+            line = f"$ {_truncate(inp.get('command', ''), 100)}"
+        elif tool in ("Read", "Edit", "Write", "MultiEdit"):
+            line = inp.get("file_path") or inp.get("path") or ""
+            line = _truncate(line, 100)
+        elif tool == "Grep":
+            line = f"grep {_truncate(inp.get('pattern', ''), 80)}"
+        elif tool == "Glob":
+            line = _truncate(inp.get("pattern", ""), 100)
+        elif tool == "TodoWrite":
+            todos = inp.get("todos") or []
+            line = f"{len(todos)} todos"
+        elif tool == "Task":
+            line = _truncate(inp.get("description", ""), 100)
+        else:
+            line = ""
+            for k, v in (inp or {}).items():
+                if isinstance(v, str) and v:
+                    line = f"{k}={_truncate(v, 80)}"
+                    break
+        return {"ts": ts, "actor": actor, "type": f"tool.{tool}",
+                "subject": "", "message": line}
+    if ct == "text":
+        return {"ts": ts, "actor": actor, "type": "assistant.text",
+                "subject": "", "message": _truncate(c.get("text", ""), 200)}
+    if ct == "thinking":
+        # Claude's saved logs redact thinking content (only signature is kept),
+        # so the message is always empty. Skip these — they'd just be noise.
+        text = c.get("thinking", "")
+        if not text:
+            return None
+        return {"ts": ts, "actor": actor, "type": "assistant.thinking",
+                "subject": "", "message": _truncate(text, 160)}
+    if ct == "tool_result":
+        out = c.get("content")
+        if isinstance(out, list):
+            out = " ".join(
+                (x.get("text", "") if isinstance(x, dict) else str(x))
+                for x in out
+            )
+        return {"ts": ts, "actor": "tool", "type": "tool.result",
+                "subject": "", "message": _truncate(str(out or ""), 120)}
+    return None
+
+
+def claude_to_events(rec: dict) -> List[dict]:
+    """Translate a Claude Code session-log record into a list of event dicts
+    (one per content block) so the entire conversation flows through our
+    renderer + AI summary buffer."""
     typ = rec.get("type")
     ts = rec.get("timestamp", "")
     msg = rec.get("message") or {}
@@ -141,96 +203,31 @@ def claude_to_event(rec: dict) -> Optional[dict]:
     role = msg.get("role")
 
     if typ == "user":
-        # user can be either a typed prompt OR a tool_result wrapped as user.
         content = msg.get("content")
         if isinstance(content, str):
-            return {
-                "ts": ts, "actor": "user", "type": "user.prompt",
-                "subject": "", "message": _truncate(content, 160),
-            }
+            return [{"ts": ts, "actor": "user", "type": "user.prompt",
+                     "subject": "", "message": _truncate(content, 200)}]
         if isinstance(content, list):
-            # tool_result: render as such
+            out = []
             for c in content:
-                if isinstance(c, dict) and c.get("type") == "tool_result":
-                    out = c.get("content")
-                    if isinstance(out, list):
-                        out = " ".join(
-                            (x.get("text", "") if isinstance(x, dict) else str(x))
-                            for x in out
-                        )
-                    return {
-                        "ts": ts, "actor": "tool", "type": "tool.result",
-                        "subject": "", "message": _truncate(str(out or ""), 120),
-                    }
-        return None
+                if isinstance(c, dict) and c.get("type") == "text":
+                    out.append({"ts": ts, "actor": "user",
+                                "type": "user.prompt", "subject": "",
+                                "message": _truncate(c.get("text", ""), 200)})
+                else:
+                    ev = _block_to_event(ts, "user", c)
+                    if ev:
+                        out.append(ev)
+            return out
+        return []
 
     if typ == "assistant" and role == "assistant":
         content = msg.get("content")
         if not isinstance(content, list):
-            return None
-        # One record can contain multiple content blocks; pick the most
-        # informative one (tool_use > text > thinking).
-        chosen = None
-        for c in content:
-            if not isinstance(c, dict):
-                continue
-            ct = c.get("type")
-            if ct == "tool_use":
-                chosen = c
-                break
-        if chosen is None:
-            for c in content:
-                if isinstance(c, dict) and c.get("type") == "text":
-                    chosen = c
-                    break
-        if chosen is None:
-            for c in content:
-                if isinstance(c, dict) and c.get("type") == "thinking":
-                    chosen = c
-                    break
-        if chosen is None:
-            return None
-        ct = chosen.get("type")
-        if ct == "tool_use":
-            tool = chosen.get("name", "tool")
-            inp = chosen.get("input") or {}
-            # Pretty-print common tools the way gastown's summarize.go did.
-            if tool == "Bash":
-                line = f"$ {_truncate(inp.get('command', ''), 100)}"
-            elif tool in ("Read", "Edit", "Write", "MultiEdit"):
-                line = inp.get("file_path") or inp.get("path") or ""
-                line = _truncate(line, 100)
-            elif tool == "Grep":
-                line = f"grep {_truncate(inp.get('pattern', ''), 80)}"
-            elif tool == "Glob":
-                line = _truncate(inp.get("pattern", ""), 100)
-            elif tool == "TodoWrite":
-                todos = inp.get("todos") or []
-                line = f"{len(todos)} todos"
-            else:
-                # generic — first short input field
-                line = ""
-                for k, v in (inp or {}).items():
-                    if isinstance(v, str) and v:
-                        line = f"{k}={_truncate(v, 80)}"
-                        break
-            return {
-                "ts": ts, "actor": "mayor", "type": f"tool.{tool}",
-                "subject": "", "message": line,
-            }
-        if ct == "text":
-            text = chosen.get("text", "")
-            return {
-                "ts": ts, "actor": "mayor", "type": "assistant.text",
-                "subject": "", "message": _truncate(text, 160),
-            }
-        if ct == "thinking":
-            return {
-                "ts": ts, "actor": "mayor", "type": "assistant.thinking",
-                "subject": "",
-                "message": _truncate(chosen.get("thinking", ""), 120),
-            }
-    return None
+            return []
+        return [e for c in content for e in [_block_to_event(ts, "mayor", c)] if e]
+
+    return []
 
 
 def fmt_claude_event(ev: dict) -> str:
@@ -501,10 +498,12 @@ class GCFeedApp(App):
                     if supervisor_status else "supervisor: ?")
         ai = "off" if DISABLED else (
             f"on • {MODEL} • every {EVERY}/{INTERVAL}s")
+        claude_seen = getattr(self, "claude_seen", 0)
         head.update(
             f"[b cyan]{os.path.basename(CITY_DIR)}[/b cyan]  "
             f"[dim]{CITY_DIR}[/dim]  │  [yellow]{sup_line}[/yellow]  │  "
-            f"buf=[b]{len(self.event_buf)}[/b]  pending=[b]{self.events_since_summary}[/b]  │  "
+            f"buf=[b]{len(self.event_buf)}[/b]  pending=[b]{self.events_since_summary}[/b]  "
+            f"claude=[b]{claude_seen}[/b]  │  "
             f"AI: [magenta]{ai}[/magenta]"
         )
 
@@ -597,50 +596,90 @@ class GCFeedApp(App):
         return candidates[0][1]
 
     async def _tail_claude_log(self) -> None:
-        path = self._newest_claude_log()
-        if not path:
-            log = self.query_one("#events", RichLog)
-            log.write(f"[dim]── no claude log at {claude_log_dir(CITY_DIR)} (yet) ──[/dim]")
-            return
-        await self._start_claude_tail(path)
-
-    async def _start_claude_tail(self, path: str) -> None:
-        if self._claude_tail_proc and self._claude_tail_proc.returncode is None:
-            self._claude_tail_proc.terminate()
-            try:
-                await asyncio.wait_for(self._claude_tail_proc.wait(), 1)
-            except asyncio.TimeoutError:
-                self._claude_tail_proc.kill()
-        self._current_claude_log = path
+        """Native Python tail -F replacement. Avoids the line-buffering issues
+        macOS BSD `tail -F` has when piped into another process. Polls for new
+        bytes every 250ms; handles file rotation (different inode → re-open)."""
         log = self.query_one("#events", RichLog)
-        log.write(f"[dim]── tailing claude log: {os.path.basename(path)} ──[/dim]")
-        # tail -n 20 = show last few records as warm-up; -F follows rotation.
-        self._claude_tail_proc = await asyncio.create_subprocess_exec(
-            "tail", "-n", "20", "-F", path,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        assert self._claude_tail_proc.stdout is not None
-        async for raw in self._claude_tail_proc.stdout:
-            line = raw.decode("utf-8", errors="replace").strip()
-            if not line:
-                continue
-            try:
-                rec = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            ev = claude_to_event(rec)
-            if not ev:
-                continue
-            log.write(fmt_claude_event(ev))
-            self.event_buf.append(ev)
-            self.events_since_summary += 1
+        path = None
+        fp = None
+        inode = None
+        offset = 0
+        announced_path = None
+        self.claude_seen = 0
+
+        try:
+            while True:
+                # Re-discover newest file on each iteration so a session
+                # restart (new sessionId.jsonl) gets picked up promptly.
+                latest = self._newest_claude_log()
+                if not latest:
+                    if announced_path is None:
+                        log.write(f"[dim]── no claude log at {claude_log_dir(CITY_DIR)} yet (waiting) ──[/dim]")
+                        announced_path = "<none>"
+                    await asyncio.sleep(2)
+                    continue
+
+                if latest != path:
+                    # Switch target.
+                    if fp is not None:
+                        fp.close()
+                    path = latest
+                    fp = open(path, "r", encoding="utf-8", errors="replace")
+                    # On first attach, jump near end (last ~64KB) to backfill
+                    # recent context without flooding with the whole history.
+                    fp.seek(0, os.SEEK_END)
+                    end = fp.tell()
+                    fp.seek(max(0, end - 65536))
+                    if end > 65536:
+                        fp.readline()  # skip partial first line
+                    offset = fp.tell()
+                    inode = os.fstat(fp.fileno()).st_ino
+                    self._current_claude_log = path
+                    log.write(f"[dim]── tailing claude log: {os.path.basename(path)} ──[/dim]")
+                    announced_path = path
+
+                # Detect file rotation (truncate or replace).
+                try:
+                    st = os.stat(path)
+                    if st.st_ino != inode or st.st_size < offset:
+                        fp.close()
+                        fp = open(path, "r", encoding="utf-8", errors="replace")
+                        offset = 0
+                        inode = os.fstat(fp.fileno()).st_ino
+                except OSError:
+                    await asyncio.sleep(1)
+                    continue
+
+                # Read and parse any new lines.
+                fp.seek(offset)
+                for line in fp:
+                    if not line.endswith("\n"):
+                        # incomplete tail; revert and wait for more
+                        break
+                    offset = fp.tell()
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    self.claude_seen += 1
+                    for ev in claude_to_events(rec):
+                        log.write(fmt_claude_event(ev))
+                        self.event_buf.append(ev)
+                        self.events_since_summary += 1
+                else:
+                    offset = fp.tell()
+
+                await asyncio.sleep(0.25)
+        finally:
+            if fp is not None:
+                fp.close()
 
     async def _maybe_repoint_claude_tail(self) -> None:
-        """If a newer log file has appeared (session restart), retarget."""
-        latest = self._newest_claude_log()
-        if latest and latest != self._current_claude_log:
-            asyncio.create_task(self._start_claude_tail(latest))
+        # No-op now — _tail_claude_log re-discovers newest file every tick.
+        return
 
     async def _do_summarize(self) -> None:
         if self.summarizing or not self.event_buf:
@@ -663,13 +702,12 @@ class GCFeedApp(App):
         self.summarizing = False
 
     async def on_unmount(self) -> None:
-        for proc in (self._tail_proc, self._claude_tail_proc):
-            if proc and proc.returncode is None:
-                proc.terminate()
-                try:
-                    await asyncio.wait_for(proc.wait(), timeout=2)
-                except asyncio.TimeoutError:
-                    proc.kill()
+        if self._tail_proc and self._tail_proc.returncode is None:
+            self._tail_proc.terminate()
+            try:
+                await asyncio.wait_for(self._tail_proc.wait(), timeout=2)
+            except asyncio.TimeoutError:
+                self._tail_proc.kill()
 
 
 if __name__ == "__main__":
