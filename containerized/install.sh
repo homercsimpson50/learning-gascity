@@ -114,11 +114,98 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 5. claude symlink (only resolves to shim when shim dir is on PATH —
-#    which only gc-docker arranges, never your interactive shell)
+# 5. claude symlinks
+#
+# Two symlinks need to exist:
+#
+#   a) $SHIM_BIN_DIR/claude → gc-docker-runner
+#      (argv[0]=claude lets one shim binary serve multiple agents)
+#
+#   b) ~/.local/bin/claude → $SHIM_BIN_DIR/gc-docker-runner
+#      Without (b) the shim is unreachable in supervisor-spawned tmux
+#      sessions, where macOS path_helper + the user's zprofile reorder
+#      PATH and push gascity-shims AFTER ~/.local/bin — so even though
+#      the supervisor exports PATH=$shims:..., the new login shell ends
+#      up resolving `claude` to the host binary at ~/.local/bin/claude.
+#      Putting the shim AT ~/.local/bin/claude wins regardless of order.
+#
+# The shim falls through to the real claude binary when GC_RIG_PATH is
+# unset, so interactive `claude --continue` still works exactly as
+# before — it just briefly passes through one extra exec.
+#
+# We capture the real binary's resolved path into a sidecar so the shim
+# doesn't have to look it up via PATH (which would loop back to itself).
 # ---------------------------------------------------------------------------
 ln -sf gc-docker-runner "$SHIM_BIN_DIR/claude"
 ok "Symlinked $SHIM_BIN_DIR/claude → gc-docker-runner"
+
+USER_CLAUDE="$HOME/.local/bin/claude"
+REAL_CLAUDE_SIDECAR="$SHIM_BIN_DIR/.real-claude"
+
+capture_real_claude() {
+    # If ~/.local/bin/claude already points at our shim, the sidecar is
+    # the source of truth — preserve it across re-runs.
+    if [ -L "$USER_CLAUDE" ]; then
+        local target
+        target="$(readlink "$USER_CLAUDE")"
+        case "$target" in
+            "$SHIM_BIN_DIR/gc-docker-runner"|*/gascity-shims/gc-docker-runner)
+                if [ -s "$REAL_CLAUDE_SIDECAR" ] && [ -x "$(cat "$REAL_CLAUDE_SIDECAR")" ]; then
+                    ok "Real claude path preserved at $REAL_CLAUDE_SIDECAR ($(cat "$REAL_CLAUDE_SIDECAR"))"
+                    return 0
+                fi
+                warn "$USER_CLAUDE already points at shim but $REAL_CLAUDE_SIDECAR is missing/stale"
+                warn "    cannot recover real claude path automatically — reinstall claude or restore from backup"
+                return 1 ;;
+        esac
+    fi
+
+    if [ ! -e "$USER_CLAUDE" ]; then
+        warn "$USER_CLAUDE not found — skipping shim PATH override"
+        warn "    install Claude Code first (https://docs.anthropic.com/claude/docs/claude-code), then re-run install.sh"
+        return 1
+    fi
+
+    # Resolve symlinks fully so we record the actual binary path, not a
+    # symlink that could later point elsewhere after a claude update.
+    local resolved
+    if command -v readlink >/dev/null 2>&1 && readlink -f / >/dev/null 2>&1; then
+        resolved="$(readlink -f "$USER_CLAUDE")"
+    else
+        # macOS readlink doesn't grok -f; chase manually.
+        resolved="$USER_CLAUDE"
+        while [ -L "$resolved" ]; do
+            local next
+            next="$(readlink "$resolved")"
+            case "$next" in
+                /*) resolved="$next" ;;
+                *)  resolved="$(cd "$(dirname "$resolved")" && pwd)/$next" ;;
+            esac
+        done
+    fi
+
+    if [ ! -x "$resolved" ]; then
+        warn "$USER_CLAUDE resolved to $resolved which is not executable — skipping"
+        return 1
+    fi
+
+    echo "$resolved" > "$REAL_CLAUDE_SIDECAR"
+    ok "Captured real claude binary: $resolved → $REAL_CLAUDE_SIDECAR"
+}
+
+install_user_claude_symlink() {
+    if [ ! -s "$REAL_CLAUDE_SIDECAR" ]; then
+        return 0  # nothing to install — capture step warned already
+    fi
+    if [ -L "$USER_CLAUDE" ] && [ "$(readlink "$USER_CLAUDE")" = "$SHIM_BIN_DIR/gc-docker-runner" ]; then
+        ok "$USER_CLAUDE already points at shim"
+        return 0
+    fi
+    ln -sf "$SHIM_BIN_DIR/gc-docker-runner" "$USER_CLAUDE"
+    ok "Symlinked $USER_CLAUDE → $SHIM_BIN_DIR/gc-docker-runner (passthrough when GC_RIG_PATH unset)"
+}
+
+capture_real_claude && install_user_claude_symlink
 
 # ---------------------------------------------------------------------------
 # 6. Install the gc-docker wrapper (the user-facing entry point)

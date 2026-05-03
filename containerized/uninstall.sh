@@ -21,12 +21,28 @@ say()  { printf '\e[1;36m→\e[0m %s\n' "$*"; }
 ok()   { printf '\e[1;32m✓\e[0m %s\n' "$*"; }
 warn() { printf '\e[1;33m⚠\e[0m %s\n' "$*"; }
 
+# Restore ~/.local/bin/claude before removing the shim it points at.
+USER_CLAUDE="$HOME/.local/bin/claude"
+REAL_CLAUDE_SIDECAR="$SHIM_BIN_DIR/.real-claude"
+if [ -L "$USER_CLAUDE" ] && [ "$(readlink "$USER_CLAUDE")" = "$SHIM_BIN_DIR/gc-docker-runner" ]; then
+    if [ -s "$REAL_CLAUDE_SIDECAR" ] && [ -x "$(cat "$REAL_CLAUDE_SIDECAR")" ]; then
+        REAL="$(cat "$REAL_CLAUDE_SIDECAR")"
+        ln -sf "$REAL" "$USER_CLAUDE"
+        ok "Restored $USER_CLAUDE → $REAL (from .real-claude sidecar)"
+    else
+        warn "$USER_CLAUDE points at shim but .real-claude is missing — leaving it; reinstall claude to fix"
+    fi
+fi
+
 # Shim + symlinks + wrapper + workspace launcher symlink
 say "Removing shim, wrapper, and workspace launcher"
 rm -f "$SHIM_BIN_DIR/gc-docker-runner" \
       "$SHIM_BIN_DIR/claude" \
       "$SHIM_BIN_DIR/codex" \
-      "$SHIM_BIN_DIR/gemini"
+      "$SHIM_BIN_DIR/gemini" \
+      "$SHIM_BIN_DIR/.real-claude" \
+      "$SHIM_BIN_DIR/.real-codex" \
+      "$SHIM_BIN_DIR/.real-gemini"
 rmdir "$SHIM_BIN_DIR" 2>/dev/null || true
 rm -f "$WRAPPER_BIN" \
       "$HOME/.local/bin/gc-workspace.sh" \

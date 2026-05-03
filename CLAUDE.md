@@ -124,9 +124,20 @@ the personal-laptop path.
   gc-docker-stop.sh  →                  (symlinks back to scripts/)
   gc-workspace-home.{sh,py} →         iTerm2 launchers for each path
   gc-workspace-work.{sh,py} →           (symlinks back to scripts/)
+  claude → gascity-shims/             shim is the user-facing claude;
+    gc-docker-runner                    falls through to real binary when
+                                        GC_RIG_PATH unset (interactive use).
+                                        Required because tmux login shells
+                                        re-run zprofile/path_helper, which
+                                        reorders PATH so this dir wins over
+                                        gascity-shims/. See install.sh §5.
   gascity-shims/
     gc-docker-runner                  the actual shim (built by install.sh)
     claude → gc-docker-runner         shim is selected by argv[0]
+    .real-claude                      sidecar holding absolute path to the
+                                      real Claude Code binary (captured at
+                                      install time; re-run install.sh after
+                                      claude auto-updates if it bricks)
 ~/.config/gascity-docker-runner/
   config.toml                         shim config: image map, network, limits
 ~/.local/state/gascity-docker-runner/

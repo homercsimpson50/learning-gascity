@@ -13,7 +13,7 @@ set -euo pipefail
 
 CONFIG="${GC_DOCKER_RUNNER_CONFIG:-$HOME/.config/gascity-docker-runner/config.toml}"
 LOG_DIR="${GC_DOCKER_RUNNER_LOG_DIR:-$HOME/.local/state/gascity-docker-runner/logs}"
-mkdir -p "$LOG_DIR"
+SHIM_DIR="${GC_DOCKER_RUNNER_SHIM_DIR:-$HOME/.local/bin/gascity-shims}"
 
 # --- Which agent are we standing in for? -----------------------------------
 AGENT_NAME="$(basename "$0")"
@@ -21,6 +21,34 @@ case "$AGENT_NAME" in
     claude|codex|gemini) ;;
     *) echo "[gc-docker-runner] FATAL invoked under unsupported name: $AGENT_NAME (expected claude|codex|gemini)" >&2; exit 64 ;;
 esac
+
+# --- Passthrough mode ------------------------------------------------------
+# When GC_RIG_PATH is unset, this is an interactive (non-supervisor)
+# invocation — the user typed `claude` themselves, or a tmux login shell
+# resolved `claude` to us via PATH order. In either case we should NOT
+# build a docker container; we should run the real host binary.
+#
+# We have to be reachable on the user's normal PATH for this to work
+# (install.sh symlinks ~/.local/bin/claude → this shim), so we MUST handle
+# the no-rig case rather than failing — otherwise the user's interactive
+# `claude` breaks. The real path was captured at install time into
+# .real-<agent> sidecars so we don't loop back to ourselves through PATH.
+if [ -z "${GC_RIG_PATH:-}" ]; then
+    REAL_BIN_FILE="$SHIM_DIR/.real-$AGENT_NAME"
+    if [ ! -f "$REAL_BIN_FILE" ]; then
+        echo "[gc-docker-runner] FATAL no real-binary sidecar at $REAL_BIN_FILE — re-run containerized/install.sh" >&2
+        exit 64
+    fi
+    REAL_BIN="$(cat "$REAL_BIN_FILE")"
+    if [ ! -x "$REAL_BIN" ]; then
+        echo "[gc-docker-runner] FATAL real $AGENT_NAME at $REAL_BIN is missing or not executable" >&2
+        echo "[gc-docker-runner]       (claude auto-update may have moved it — re-run containerized/install.sh)" >&2
+        exit 64
+    fi
+    exec "$REAL_BIN" "$@"
+fi
+
+mkdir -p "$LOG_DIR"
 
 # --- Parse the (intentionally tiny) TOML config ---------------------------
 # We only need a handful of keys; full TOML parsing in pure bash is overkill.
@@ -73,15 +101,8 @@ TIMEOUT="$(toml_get limits timeout)"; : "${TIMEOUT:=30m}"
 NETWORK="$(toml_get network mode)"; : "${NETWORK:=bridge}"
 
 # --- Resolve the rig path --------------------------------------------------
-# Gas City exports GC_RIG_PATH for runtime providers. If it's missing (e.g.
-# the supervisor invoked the shim without proper env), we refuse to mount
-# anything — the alternative is mounting $PWD which could be the user's
-# home directory.
-RIG_PATH="${GC_RIG_PATH:-}"
-if [ -z "$RIG_PATH" ]; then
-    echo "[gc-docker-runner] FATAL GC_RIG_PATH is empty — refusing to start without a scoped worktree" >&2
-    exit 64
-fi
+# GC_RIG_PATH is non-empty here (passthrough above handles the unset case).
+RIG_PATH="$GC_RIG_PATH"
 if [ ! -d "$RIG_PATH" ]; then
     echo "[gc-docker-runner] FATAL GC_RIG_PATH does not exist or is not a directory: $RIG_PATH" >&2
     exit 64
