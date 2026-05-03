@@ -45,7 +45,6 @@ run_in_container() {
         --network bridge \
         --cap-drop=ALL \
         --security-opt=no-new-privileges \
-        --security-opt=seccomp=default \
         --entrypoint /bin/bash \
         "$IMAGE" -c "$1" 2>&1
 }
@@ -68,12 +67,21 @@ fi
 # does not exist in the container's view) and verifying the host $HOME is
 # untouched. We also confirm /home/agent contents are tmpfs (ephemeral).
 # ---------------------------------------------------------------------------
-HOST_HOME_FILE="$HOME/.bashrc"  # benign sentinel
-[ -f "$HOST_HOME_FILE" ] && hash_before="$(shasum "$HOST_HOME_FILE" 2>/dev/null | awk '{print $1}')"
-run_in_container 'rm -rf /home/agent /tmp/* 2>/dev/null; ls /home/agent 2>&1' >/dev/null
+# Pick whichever sentinel exists on this host; fall back to .zshrc.
+HOST_HOME_FILE=""
+for candidate in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+    if [ -f "$candidate" ]; then HOST_HOME_FILE="$candidate"; break; fi
+done
+hash_before=""
 hash_after=""
-[ -f "$HOST_HOME_FILE" ] && hash_after="$(shasum "$HOST_HOME_FILE" 2>/dev/null | awk '{print $1}')"
-if [ "$hash_before" = "$hash_after" ]; then
+if [ -n "$HOST_HOME_FILE" ]; then
+    hash_before="$(shasum "$HOST_HOME_FILE" 2>/dev/null | awk '{print $1}')"
+fi
+run_in_container 'rm -rf /home/agent /tmp/* 2>/dev/null; ls /home/agent 2>&1' >/dev/null
+if [ -n "$HOST_HOME_FILE" ]; then
+    hash_after="$(shasum "$HOST_HOME_FILE" 2>/dev/null | awk '{print $1}')"
+fi
+if [ -n "$HOST_HOME_FILE" ] && [ "$hash_before" = "$hash_after" ]; then
     report pass "2. footgun: host \$HOME untouched after rm -rf inside container"
 else
     report fail "2. footgun" "host file changed during container rm — investigate IMMEDIATELY"

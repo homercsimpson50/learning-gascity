@@ -116,7 +116,6 @@ exec_docker() {
         --pids-limit="$LIM_PIDS" \
         --cap-drop=ALL \
         --security-opt=no-new-privileges \
-        --security-opt=seccomp=default \
         "${ENV_FLAGS[@]}" \
         --interactive \
         $( [ -t 0 ] && echo --tty ) \
