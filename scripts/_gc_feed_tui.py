@@ -62,9 +62,11 @@ NOISE_ACTORS = {"cache-reconcile"}
 NOISE_TYPES = {"controller.heartbeat"}
 
 # Type-prefix filters: any event whose `type` starts with one of these is
-# dropped at ingest. User wants visibility into agent intent (assistant.text,
-# user.prompt, session lifecycle, mail) but not the per-call bead/tool churn.
-NOISE_TYPE_PREFIXES = ("bead.", "tool.")
+# dropped at ingest. User keeps only direction (user.prompt) + supervisor
+# lifecycle (session/agent/mail/controller events). Mayor's free-form
+# responses (assistant.text/thinking) are filtered — the AI summary panel
+# already captures their gist; the raw text was eating screen real estate.
+NOISE_TYPE_PREFIXES = ("bead.", "tool.", "assistant.")
 
 SUMMARY_PROMPT = (
     "You are summarizing live activity from a multi-agent coding system "
