@@ -48,6 +48,21 @@ if [ -z "$IMAGE" ]; then
     exit 64
 fi
 
+# Fail loud (not silent) if the configured image is missing. Without this
+# check, an `exec claude …` invocation would silently exit 0 / 125, which
+# is impossible to debug — especially if the shim has been put on a global
+# PATH by accident and intercepts the user's normal `claude` use.
+if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+    cat >&2 <<EOF
+[gc-docker-runner] FATAL image not present: $IMAGE
+                   build it with:
+                     cd <learning-gascity>/containerized
+                     docker build -t $IMAGE agent-runner/
+                   or remove the shim from PATH if you didn't mean to use it.
+EOF
+    exit 125
+fi
+
 LIM_MEM="$(toml_get limits memory)"; : "${LIM_MEM:=4g}"
 LIM_CPU="$(toml_get limits cpus)";   : "${LIM_CPU:=2}"
 LIM_PIDS="$(toml_get limits pids_limit)"; : "${LIM_PIDS:=512}"

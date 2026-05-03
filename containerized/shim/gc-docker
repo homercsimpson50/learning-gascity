@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# gc-docker — invokes gc with the agent shim on PATH.
+#
+# This is the opt-in wrapper. You explicitly type `gc-docker …` instead
+# of `gc …` whenever you want agents to run inside Docker. Your normal
+# `claude` and `gc` invocations stay completely untouched — the shim is
+# only on the PATH of THIS process and its children.
+#
+# Examples:
+#   gc-docker supervisor run             # foreground supervisor with sandboxed agents
+#   gc-docker init ~/test-city           # init still goes to normal gc; harmless
+#   gc-docker start ~/test-city          # registers the launchd supervisor
+#                                        #   (caveat: launchd doesn't inherit our env;
+#                                        #   prefer `gc-docker supervisor run` for tests)
+#
+# Anything you can do with `gc` you can do with `gc-docker`. The only
+# difference is the shim is reachable via PATH inside this process tree.
+
+set -euo pipefail
+
+SHIM_DIR="${SHIM_DIR:-$HOME/.local/bin/gascity-shims}"
+
+if [ ! -x "$SHIM_DIR/gc-docker-runner" ]; then
+    echo "gc-docker: shim missing at $SHIM_DIR/gc-docker-runner" >&2
+    echo "           run learning-gascity/containerized/install.sh first" >&2
+    exit 127
+fi
+
+if ! command -v gc >/dev/null 2>&1; then
+    echo "gc-docker: 'gc' not on PATH — install gascity first" >&2
+    exit 127
+fi
+
+export PATH="$SHIM_DIR:$PATH"
+exec gc "$@"

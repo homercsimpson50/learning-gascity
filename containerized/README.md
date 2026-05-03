@@ -18,13 +18,19 @@ containerized/
 ├── agent-runner/          ← image: minimal Debian + agent CLI + entrypoint
 │   ├── Dockerfile
 │   └── entrypoint.sh
-├── shim/                  ← host-side wrapper invoked by the supervisor
+├── shim/
 │   ├── gc-docker-runner   ← bash; converts `claude …` → `docker run …`
+│   ├── gc-docker          ← user-facing wrapper: `gc-docker <gc subcommand>`
 │   └── config.example.toml
-├── install.sh             ← one-shot: docker check, build, shim, symlink, PATH, verify
+├── install.sh             ← docker check, build, install shim + wrapper, verify
 ├── uninstall.sh           ← reverse install.sh
 └── verify.sh              ← runs the seven isolation probes from the spec §8
 ```
+
+> **No global PATH change.** `install.sh` does **not** touch your
+> `~/.zshrc`. Your normal `claude` and `gc` keep working exactly as
+> before. To run gc with sandboxed agents, you explicitly type
+> **`gc-docker`** instead of `gc`. Everything else flows through.
 
 ---
 
@@ -34,13 +40,20 @@ containerized/
 ┌─────────────────────────────────────────────────────────────┐
 │  Host (your laptop)                                         │
 │                                                             │
-│   gc (CLI) ──► gc-supervisor ──► runtime provider           │
-│                                       │                     │
-│                                       ▼  exec("claude" …)   │
-│                          ~/.local/bin/gascity-shims/claude  │
-│                                       │                     │
-│                                       ▼  docker run …       │
-│   ┌───────────────────────────────────┴─────────────────┐   │
+│   You type:  gc-docker supervisor run                       │
+│                  │                                          │
+│                  │  prepends shim dir to its OWN PATH       │
+│                  ▼  then exec gc supervisor run             │
+│   gc-supervisor ──► runtime provider                        │
+│                          │                                  │
+│                          ▼  exec("claude" …)                │
+│             ~/.local/bin/gascity-shims/claude  ← shim       │
+│                          │   (only on PATH because          │
+│                          │    gc-docker put it there;       │
+│                          │    your interactive shell is     │
+│                          │    completely untouched)         │
+│                          ▼  docker run …                    │
+│   ┌──────────────────────┴──────────────────────────────┐   │
 │   │ Container: gascity-agent-runner:claude              │   │
 │   │   - claude CLI                                      │   │
 │   │   - rig worktree at /work (rw)                      │   │
@@ -61,42 +74,54 @@ Spec reference: [§2 design overview](../docs/containerizing-gascity-for-local-u
 You only need Docker installed. If Docker isn't running, `install.sh`
 will start Docker Desktop on macOS and wait for it.
 
+### Setup (once per laptop)
+
 ```bash
 ./install.sh
 ```
 
-That single command:
+That installs the shim, the `gc-docker` wrapper, the default config,
+builds the agent image, and runs `verify.sh`. **It does not touch your
+shell's PATH.** Your `claude` and `gc` keep working exactly as before.
 
-1. Makes sure Docker is up (auto-launches Docker Desktop on macOS).
-2. Builds `gascity-agent-runner:claude` from `agent-runner/`.
-3. Installs the shim at `~/.local/bin/gascity-shims/gc-docker-runner`.
-4. Drops a default config at `~/.config/gascity-docker-runner/config.toml`
-   (preserves any existing config).
-5. Symlinks `claude` → `gc-docker-runner` in the same directory.
-6. Adds `~/.local/bin/gascity-shims` to your shell rc's PATH (idempotent,
-   marker-fenced).
-7. Runs `verify.sh` — the seven isolation probes from spec §8.
-
-When it finishes: open a new terminal (or `source ~/.zshrc`) and use Gas
-City normally. Agents the supervisor spawns will run in scoped containers
-automatically.
+### Use it
 
 ```bash
+# Normal local gc — agents run on the host:
 gc init ~/my-city
-cd ~/my-city
-gc rig add ~/code/some-repo
-bd create "do a thing"
 gc start
+
+# Containerized — agents run inside Docker:
+gc-docker init ~/test-city          # any gc subcommand works through the wrapper
+gc-docker supervisor run            # foreground supervisor with sandboxed agents
 ```
 
-To remove everything: `./uninstall.sh`. The image, your config, and
+Verify nothing was changed:
+
+```bash
+which claude       # → /Users/you/.local/bin/claude  (your normal claude)
+which gc           # → /Users/you/.local/bin/gc      (your normal gc)
+which gc-docker    # → /Users/you/.local/bin/gc-docker  (the new wrapper)
+```
+
+### Uninstall
+
+`./uninstall.sh` removes the shim, the wrapper, and any leftover PATH
+lines from older versions of `install.sh`. The image, your config, and
 session logs are preserved (instructions to delete them are printed).
 
-When `gc-supervisor` execs `claude`, your shell's PATH lookup hits
-`~/.local/bin/gascity-shims/claude` first, which is a symlink to
-`gc-docker-runner`. The shim forwards stdio + signals into the container
-and exits with the container's exit code. Gas City sees a normal
-process — it has no idea it just talked to a container.
+### How the wrapper works
+
+`gc-docker` does exactly two things, in this order:
+
+1. Prepends `~/.local/bin/gascity-shims` to its *own* PATH.
+2. `exec`s `gc "$@"`.
+
+`gc` and its child supervisor inherit that PATH. When the supervisor
+later does `exec("claude", …)`, the shim wins the PATH lookup and
+translates the call into a hardened `docker run` against
+`gascity-agent-runner:claude`. Your interactive shell never sees the
+shim — only `gc-docker`'s child processes do.
 
 ---
 

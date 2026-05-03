@@ -11,8 +11,11 @@ learning-gascity/
 ├── containerized/                                       ← Option A: host gc + agents in scoped containers
 │   ├── agent-runner/   (image: minimal Debian + claude CLI)
 │   ├── shim/           (gc-docker-runner — wraps `claude` → `docker run`)
-│   ├── install.sh
+│   ├── install.sh      (first run: build, shim, city init, gastown, supervisor up)
+│   ├── start.sh        (every day: docker, shim PATH, supervisor up, mayor wait)
 │   └── verify.sh
+├── configs/                                             ← versioned config that survives a fresh laptop
+│   └── gc-CLAUDE.md    (mayor operating recipe — symlinked into ~/gc/CLAUDE.md by install.sh)
 ├── scripts/                                             ← local launcher
 │   ├── gascity-workspace.sh / .py   (4-pane iTerm2 layout against ~/gc)
 │   ├── gascity-start.sh / -stop.sh  (city lifecycle helpers)
@@ -66,12 +69,16 @@ on `PATH` and translates each agent invocation into a hardened
 
 ```bash
 cd containerized/
-./install.sh                      # build agent image, install shim, set up symlinks, drop default config
-export PATH="$HOME/.local/bin/gascity-shims:$PATH"   # then add to your shell rc
-./verify.sh                       # 7 isolation probes from the spec §8
-gc init ~/my-city && cd ~/my-city
-gc rig add ~/code/some-repo && bd create "do a thing" && gc start
+./install.sh                      # first time only — builds image, installs shim,
+                                  # inits ~/gc with the gastown pack, symlinks
+                                  # CLAUDE.md, brings the supervisor up
+./start.sh                        # every day — docker check, shim PATH, supervisor up
+./start.sh --attach               # ...and attach to the mayor session
 ```
+
+After that, **just talk to the mayor** — say "start a rig at `~/code/foo`"
+or "build me X" and the mayor handles the gascity plumbing for you. No
+need to type `gc init`, `gc rig add`, or `bd create` by hand.
 
 Full guide: [`containerized/README.md`](containerized/README.md).
 
