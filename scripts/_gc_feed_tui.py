@@ -61,10 +61,10 @@ def claude_log_dir(work_dir: str) -> str:
 NOISE_ACTORS = {"cache-reconcile"}
 NOISE_TYPES = {"controller.heartbeat"}
 
-# (Previously filtered Claude Code subagent tools (tool.Task*, tool.Monitor)
-# are now kept — the user wants visibility into mayor delegating work to
-# subagents.)
-NOISE_CLAUDE_TYPES: set = set()
+# Type-prefix filters: any event whose `type` starts with one of these is
+# dropped at ingest. User wants visibility into agent intent (assistant.text,
+# user.prompt, session lifecycle, mail) but not the per-call bead/tool churn.
+NOISE_TYPE_PREFIXES = ("bead.", "tool.")
 
 SUMMARY_PROMPT = (
     "You are summarizing live activity from a multi-agent coding system "
@@ -82,35 +82,44 @@ SUMMARY_PROMPT = (
 
 # --- event formatting -------------------------------------------------------
 
+# Standard column widths for both gc events and claude events. Same shape
+# = aligned columns in the events log.
+COL_ACTOR = 10
+COL_TYPE = 22
+
+def _fmt_row(ts: str, actor: str, typ: str, msg: str, actor_color: str = "white") -> str:
+    return (f"[dim]{ts}[/dim] "
+            f"[{actor_color}]{actor:<{COL_ACTOR}}[/{actor_color}] "
+            f"[cyan]{typ:<{COL_TYPE}}[/cyan] {msg}")
+
+
 def fmt_event(ev: dict) -> str:
-    """One-line, rich-markup form of a gc API event."""
+    """One-line, rich-markup form of a gc API event. Same column layout
+    as fmt_claude_event below so the events log stays aligned."""
     ts = ev.get("ts", "")[11:19]
     typ = ev.get("type", "?")
-    actor = ev.get("actor", "?")
+    actor = ev.get("actor", "?") or "-"
     subject = ev.get("subject", "")
     msg = ev.get("message", "")
     bead = (ev.get("payload") or {}).get("bead") or {}
 
-    bits = [f"[dim]{ts}[/dim]", f"[cyan]{typ:<22}[/cyan]", f"{actor:<14}"]
+    extras = []
     if subject:
-        bits.append(subject)
+        extras.append(subject)
     if isinstance(bead, dict):
         title = bead.get("title", "")
         itype = bead.get("issue_type", "")
         state = bead.get("status", "")
         meta = bead.get("metadata") or {}
         sess_state = meta.get("state") if isinstance(meta, dict) else None
-        if itype:
-            bits.append(f"[yellow]{itype}[/yellow]")
-        if state:
-            bits.append(state)
-        if sess_state and sess_state != state:
-            bits.append(f"→{sess_state}")
-        if title:
-            bits.append(f'[italic]"{title}"[/italic]')
+        if itype: extras.append(f"[yellow]{itype}[/yellow]")
+        if state: extras.append(state)
+        if sess_state and sess_state != state: extras.append(f"→{sess_state}")
+        if title:  extras.append(f'[italic]"{title}"[/italic]')
     if msg and msg != subject:
-        bits.append(f"[dim]({msg})[/dim]")
-    return " ".join(bits)
+        extras.append(f"[dim]({msg})[/dim]")
+
+    return _fmt_row(ts, actor[:COL_ACTOR], typ[:COL_TYPE], " ".join(extras))
 
 
 def fmt_event_for_prompt(ev: dict) -> str:
@@ -133,8 +142,12 @@ def fmt_event_for_prompt(ev: dict) -> str:
 def is_noise(ev: dict) -> bool:
     if ev.get("actor") in NOISE_ACTORS:
         return True
-    if ev.get("type") in NOISE_TYPES:
+    typ = ev.get("type", "")
+    if typ in NOISE_TYPES:
         return True
+    for p in NOISE_TYPE_PREFIXES:
+        if typ.startswith(p):
+            return True
     return False
 
 
@@ -233,7 +246,7 @@ def claude_to_events(rec: dict, default_actor: str = "mayor") -> List[dict]:
 
 def fmt_claude_event(ev: dict) -> str:
     ts = ev.get("ts", "")[11:19]
-    actor = ev.get("actor", "?")
+    actor = ev.get("actor", "?") or "-"
     typ = ev.get("type", "?")
     msg = ev.get("message", "")
     color = {
@@ -241,8 +254,7 @@ def fmt_claude_event(ev: dict) -> str:
         "user":  "magenta",
         "tool":  "blue",
     }.get(actor, "white")
-    return (f"[dim]{ts}[/dim] [{color}]{actor:<8}[/{color}] "
-            f"[cyan]{typ:<22}[/cyan] {msg}")
+    return _fmt_row(ts, actor[:COL_ACTOR], typ[:COL_TYPE], msg, color)
 
 
 # --- gc helpers ------------------------------------------------------------
@@ -366,8 +378,8 @@ class GCFeedApp(App):
     #left  { width: 36%; }
     #right { width: 64%; border-left: solid $accent; }
 
-    #rigs  { height: 50%; }
-    #todos { height: 50%; border-top: solid $accent; padding: 0 1; }
+    #rigs     { height: 50%; }
+    #sessions { height: 50%; border-top: solid $accent; }
 
     #events  { height: 1fr; }
     #summary { height: 12; border-top: solid $warning; }
@@ -416,16 +428,13 @@ class GCFeedApp(App):
         # Active claude tailers, keyed by file path.
         self._tailers: Dict[str, FileTailer] = {}
 
-        # Mayor todos (parsed from TodoWrite tool calls).
-        self.todos: List[Dict] = []
-
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield Static(id="header_status")
         with Horizontal(id="top"):
             with Vertical(id="left"):
                 yield DataTable(id="rigs", zebra_stripes=True)
-                yield Static(id="todos", markup=True)
+                yield DataTable(id="sessions", zebra_stripes=True)
             with Vertical(id="right"):
                 yield RichLog(id="events", highlight=False, markup=True,
                               wrap=False, max_lines=2000)
@@ -442,8 +451,9 @@ class GCFeedApp(App):
         rigs_t.cursor_type = "row"
         rigs_t.add_row("(all rigs)", "merged stream")
 
-        todos_w = self.query_one("#todos", Static)
-        todos_w.update("[dim]Mayor's TodoWrite list will appear here as it changes.[/dim]")
+        sess_t = self.query_one("#sessions", DataTable)
+        sess_t.add_columns("session", "agent", "state", "last")
+        sess_t.cursor_type = "row"
 
         summary_w = self.query_one("#summary", RichLog)
         summary_w.write(
@@ -463,6 +473,7 @@ class GCFeedApp(App):
 
         self.set_interval(8.0, lambda: self._spawn(self._refresh_state()))
         self.set_interval(15.0, lambda: self._spawn(self._refresh_rigs()))
+        self.set_interval(5.0, lambda: self._spawn(self._refresh_sessions()))
         self.set_interval(0.5,  lambda: self._spawn(self._poll_tailers()))
         if not DISABLED:
             self.set_interval(2.0, self._maybe_summarize_sync)
@@ -531,13 +542,13 @@ class GCFeedApp(App):
         if flush:
             self.event_buf.clear()
             self.events_since_summary = 0
-            self.todos = []
             try:
                 self.query_one("#events", RichLog).clear()
                 self.query_one("#summary", RichLog).clear()
             except Exception:
                 pass
-            self._render_todos()
+        # Re-scope the sessions table to the new rig.
+        self._spawn(self._refresh_sessions())
 
         # Decide which dirs to watch.
         dirs_to_watch: List[str] = []
@@ -589,10 +600,9 @@ class GCFeedApp(App):
                 continue
             for rec in records:
                 self.claude_seen += 1
-                self._maybe_update_todos(rec)
                 actor = self._actor_for_path(path)
                 for ev in claude_to_events(rec, default_actor=actor):
-                    if ev.get("type") in NOISE_CLAUDE_TYPES:
+                    if is_noise(ev):
                         continue
                     log.write(fmt_claude_event(ev))
                     self.event_buf.append(ev)
@@ -815,55 +825,42 @@ class GCFeedApp(App):
             self.event_buf.append(ev)
             self.events_since_summary += 1
 
-    # --- todos panel ---------------------------------------------------
+    # --- sessions panel ------------------------------------------------
 
-    def _maybe_update_todos(self, claude_record: dict) -> None:
-        """Watch for the most recent TodoWrite tool call and re-render the
-        todos panel from its input.todos."""
-        if claude_record.get("type") != "assistant":
-            return
-        content = (claude_record.get("message") or {}).get("content") or []
-        if not isinstance(content, list):
-            return
-        latest_todos = None
-        for c in content:
-            if isinstance(c, dict) and c.get("type") == "tool_use" and c.get("name") == "TodoWrite":
-                latest_todos = (c.get("input") or {}).get("todos") or []
-        if latest_todos is None:
-            return
-        self.todos = latest_todos
-        self._render_todos()
-
-    def _render_todos(self) -> None:
+    async def _refresh_sessions(self) -> None:
+        """Populate the sessions table with rows scoped to the current rig.
+        Source: `gc session list --json`. When scope is "(all rigs)", show
+        every session; otherwise filter by WorkDir == rig path."""
+        out = await run_gc("session", "list", "--json", "--state", "all", timeout=10)
         try:
-            w = self.query_one("#todos", Static)
+            sessions = json.loads(out) if out.strip() else []
+        except Exception:
+            sessions = []
+
+        scope_path = self.current_rig_path
+        if scope_path is not None:
+            sessions = [s for s in sessions if s.get("WorkDir") == scope_path]
+
+        try:
+            t = self.query_one("#sessions", DataTable)
         except Exception:
             return
-        if not self.todos:
-            w.update(
-                "[b]Todos[/b] [dim](agent's TodoWrite tool)[/dim]\n"
-                f"[dim]scope: {self.current_rig_label}[/dim]\n"
-                "[dim]waiting for the active agent to call TodoWrite…[/dim]"
-            )
-            return
-        lines = ["[b]Mayor's todos[/b]"]
-        for t in self.todos[:14]:
-            status = (t.get("status") or "pending")
-            content = t.get("content") or ""
-            icon = {
-                "pending":     "[dim]☐[/dim]",
-                "in_progress": "[yellow]◐[/yellow]",
-                "completed":   "[green]☑[/green]",
-            }.get(status, "?")
-            color = {
-                "pending":     "white",
-                "in_progress": "b yellow",
-                "completed":   "dim strike",
-            }.get(status, "white")
-            lines.append(f"{icon} [{color}]{_truncate(content, 70)}[/{color}]")
-        if len(self.todos) > 14:
-            lines.append(f"[dim]… {len(self.todos) - 14} more[/dim]")
-        w.update("\n".join(lines))
+        prev = t.cursor_row
+        t.clear(columns=False)
+        if not sessions:
+            t.add_row("(none)", "", "", "")
+        else:
+            for s in sessions:
+                sid = s.get("ID", "?")
+                tmpl = s.get("Template") or s.get("AgentName") or "?"
+                state = s.get("State") or "?"
+                last = s.get("LastActive", "") or ""
+                # last → just HH:MM:SS
+                if "T" in last:
+                    last = last.split("T", 1)[1][:8]
+                t.add_row(sid, tmpl, state, last)
+        if prev is not None and prev < t.row_count:
+            t.move_cursor(row=prev)
 
     # --- teardown -----------------------------------------------------
 
