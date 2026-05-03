@@ -13,7 +13,8 @@ Layout (matches the gastown layout, but with gascity):
   └──────────┴─────────────────────┘
 
 Usage:
-  ./gascity-workspace.py
+  ./gascity-workspace.py          # Plain feed in the bottom pane
+  ./gascity-workspace.py --ai     # Bottom pane runs gc-feed-ai (Ollama summary)
 
 Requires iTerm2 with Python API enabled:
   iTerm2 → Preferences → General → Magic → Enable Python API
@@ -22,8 +23,12 @@ Requires iTerm2 with Python API enabled:
 import iterm2
 import asyncio
 import os
+import sys
 
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONTAINER_DIR = os.path.expanduser("~/code/learning-gascity/containerized")
+
+USE_AI = "--ai" in sys.argv
 
 LOCAL_MAYOR = (
     'cd ~/gc && echo "Starting local Gas City..." '
@@ -33,7 +38,11 @@ CONTAINER_MAYOR = (
     f'cd {CONTAINER_DIR} && docker compose exec gascity gc session attach mayor'
 )
 CODE_SHELL = 'cd ~/code'
-EVENT_FEED = 'cd ~/gc && gc events --follow'
+EVENT_FEED = (
+    f'cd ~/gc && {SCRIPT_DIR}/gc-feed-ai'
+    if USE_AI
+    else 'cd ~/gc && gc events --follow'
+)
 
 
 async def main(connection):

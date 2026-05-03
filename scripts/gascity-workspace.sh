@@ -18,16 +18,27 @@
 # Bottom-wide pane: live event feed for the local city
 #
 # Usage:
-#   ./gascity-workspace.sh
+#   ./gascity-workspace.sh          # Plain feed in the bottom pane
+#   ./gascity-workspace.sh --ai     # Bottom pane runs gc-feed-ai (Ollama summary)
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CONTAINER_DIR="$HOME/code/learning-gascity/containerized"
+
+USE_AI=0
+if [ "${1:-}" = "--ai" ]; then
+    USE_AI=1
+fi
 
 LOCAL_MAYOR='cd ~/gc && echo "Starting local Gas City..." && gc supervisor start 2>/dev/null; gc session attach mayor'
 CONTAINER_MAYOR="cd $CONTAINER_DIR && docker compose exec gascity gc session attach mayor"
 CODE_SHELL='cd ~/code'
-EVENT_FEED='cd ~/gc && gc events --follow'
+if [ "$USE_AI" -eq 1 ]; then
+    EVENT_FEED="cd ~/gc && $SCRIPT_DIR/gc-feed-ai"
+else
+    EVENT_FEED='cd ~/gc && gc events --follow'
+fi
 
 osascript <<APPLESCRIPT
 tell application "iTerm2"

@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+#
+# gc-feed-ai — gc events --follow with periodic AI summary via local Ollama.
+#
+# Drop-in replacement for `gtc feed --ai` from the gastown side, except it
+# wraps `gc events --follow` instead. Does not modify any gascity binary —
+# this is pure wrapper code:
+#
+#   1. Ensures Ollama is installed and running, with the configured model.
+#   2. Pipes `gc events --follow` (JSON Lines) into _gc_feed_ai.py, which
+#      pretty-prints each event one line at a time and, every N events or T
+#      seconds, asks Ollama for a 2-3 sentence summary of the recent buffer.
+#   3. On exit (Ctrl-C, SIGTERM), stops Ollama to free RAM — same lifecycle
+#      hygiene as gtc feed --ai.
+#
+# Usage:
+#   ./gc-feed-ai                # run against local city (cwd or --city)
+#   ./gc-feed-ai --city ~/gc    # explicit city
+#   ./gc-feed-ai --no-ai        # plain pass-through (skip Ollama, sanity test)
+#
+# Env knobs (match gtc conventions):
+#   GC_FEED_AI_MODEL    default qwen2.5:3b
+#   GC_FEED_AI_EVERY    summarize every N events (default 8)
+#   GC_FEED_AI_INTERVAL summarize at least every T seconds (default 45)
+#   OLLAMA_URL          default http://localhost:11434
+
+set -euo pipefail
+
+MODEL="${GC_FEED_AI_MODEL:-qwen2.5:3b}"
+OLLAMA_URL="${OLLAMA_URL:-http://localhost:11434}"
+
+if [ -t 1 ]; then
+    GREEN=$'\033[0;32m'; RED=$'\033[0;31m'; YELLOW=$'\033[0;33m'
+    BOLD=$'\033[1m'; DIM=$'\033[2m'; NC=$'\033[0m'
+else
+    GREEN=''; RED=''; YELLOW=''; BOLD=''; DIM=''; NC=''
+fi
+
+die() { echo "${RED}Error:${NC} $*" >&2; exit 1; }
+
+# -------- arg parse --------
+NO_AI=0
+PASSTHROUGH=()
+for arg in "$@"; do
+    case "$arg" in
+        --no-ai) NO_AI=1 ;;
+        *)       PASSTHROUGH+=("$arg") ;;
+    esac
+done
+
+# -------- Ollama setup (only if AI on) --------
+ensure_ollama() {
+    if ! command -v ollama >/dev/null 2>&1; then
+        echo
+        echo "${BOLD}AI summary requires Ollama (local LLM runtime).${NC}"
+        echo "  Will install via Homebrew and download ${BOLD}${MODEL}${NC} (~2GB)."
+        echo "  Estimated time: 2-5 minutes. Ollama runs locally — ${GREEN}no cloud, no cost.${NC}"
+        echo
+        read -r -p "  Install Ollama and download model? [Y/n] " confirm
+        case "$confirm" in
+            [nN]*) echo "  Skipping AI summary."; return 1 ;;
+        esac
+        brew install ollama || die "Failed to install Ollama"
+    fi
+
+    if ! curl -sf "${OLLAMA_URL}/api/tags" >/dev/null 2>&1; then
+        echo "  ${DIM}Starting Ollama...${NC}"
+        brew services start ollama 2>/dev/null || ollama serve &>/dev/null &
+        local tries=0
+        while ! curl -sf "${OLLAMA_URL}/api/tags" >/dev/null 2>&1; do
+            tries=$((tries + 1))
+            [ $tries -gt 15 ] && die "Ollama failed to start after 15 seconds"
+            sleep 1
+        done
+        echo "  ${GREEN}Ollama running.${NC}"
+    fi
+
+    if ! ollama list 2>/dev/null | grep -q "$MODEL"; then
+        echo
+        echo "  ${BOLD}Downloading model ${MODEL}...${NC} (one-time)"
+        ollama pull "$MODEL" || die "Failed to download model"
+        echo "  ${GREEN}Model ready.${NC}"
+    fi
+
+    return 0
+}
+
+cleanup() {
+    if [ "$NO_AI" -eq 0 ]; then
+        echo
+        echo "  ${DIM}Stopping Ollama to free memory...${NC}"
+        brew services stop ollama 2>/dev/null || pkill -f "ollama serve" 2>/dev/null || true
+    fi
+}
+
+if [ "$NO_AI" -eq 0 ]; then
+    if ensure_ollama; then
+        echo "  ${GREEN}AI summary on${NC} (model=${MODEL}, every=${GC_FEED_AI_EVERY:-8} events / ${GC_FEED_AI_INTERVAL:-45}s)"
+        trap cleanup EXIT INT TERM
+    else
+        NO_AI=1
+    fi
+fi
+
+# -------- pipe gc events --follow → summarizer --------
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SUMMARIZER="$SCRIPT_DIR/_gc_feed_ai.py"
+
+export GC_FEED_AI_MODEL="$MODEL"
+export OLLAMA_URL="$OLLAMA_URL"
+export GC_FEED_AI_DISABLE="$NO_AI"
+exec gc events --follow ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"} | "$SUMMARIZER"

@@ -44,12 +44,14 @@ docker compose logs -f gascity                      # tail logs
 
 ```bash
 ./scripts/gascity-workspace.sh        # AppleScript: opens 4-pane iTerm2 layout
-./scripts/gascity-workspace.py        # iTerm2 Python API equivalent
+./scripts/gascity-workspace.sh --ai   # Same layout, feed pane uses Ollama summary
+./scripts/gascity-workspace.py        # iTerm2 Python API equivalent (also takes --ai)
 
 cd ~/gc && gc doctor                  # health check
 cd ~/gc && gc status                  # city + sessions
 cd ~/gc && gc session attach mayor    # attach to mayor (also what the workspace's left pane runs)
 cd ~/gc && gc events --follow         # live event stream (the "feed" pane)
+cd ~/gc && ../code/learning-gascity/scripts/gc-feed-ai     # same stream + periodic Ollama summary
 gc supervisor status                  # is the machine-wide supervisor up?
 ```
 
@@ -93,12 +95,32 @@ gascity commands substituted:
 - Top-mid pane: `docker compose exec gascity gc session attach mayor` (the
   containerized city — only useful if `containerized/` is also up)
 - Top-right pane: plain shell at `~/code`
-- Bottom wide pane: `gc events --follow` (replaces gastown's `gt feed`; gc
-  emits JSON-Lines, not a TUI)
+- Bottom wide pane: `gc events --follow` (or `gc-feed-ai` with `--ai`)
 
 Both scripts produce the same layout — `.sh` uses AppleScript via
 `osascript`, `.py` uses the iTerm2 Python API (which must be enabled in
-iTerm2 → Preferences → General → Magic).
+iTerm2 → Preferences → General → Magic). Both accept `--ai`.
+
+### `scripts/gc-feed-ai` (the "--ai" feed)
+
+`gc events --follow` is JSON-Lines, not a TUI like `gt feed`. To recover
+the gastown `gtc feed --ai` UX, this repo ships a wrapper pair:
+
+- `scripts/gc-feed-ai` — bash entry point. Ensures Ollama is installed,
+  running, and has the model pulled (`qwen2.5:3b` by default). Pipes
+  `gc events --follow` into the Python helper. Stops Ollama via
+  `brew services stop` on exit to free RAM (matches gtc lifecycle hygiene).
+- `scripts/_gc_feed_ai.py` — stdlib-only summarizer. Pretty-prints each
+  event one line at a time. Every `GC_FEED_AI_EVERY` events (default 8) or
+  `GC_FEED_AI_INTERVAL` seconds (default 45), POSTs the recent buffer to
+  Ollama's `/api/generate` and prints a 2-3 sentence summary block.
+
+Knobs: `GC_FEED_AI_MODEL` (model name), `GC_FEED_AI_EVERY`,
+`GC_FEED_AI_INTERVAL`, `OLLAMA_URL`, `GC_FEED_AI_DISABLE=1` (no-AI
+formatting only — sanity-checks the JSON parse without burning Ollama).
+
+This is **pure wrapper code** — no upstream gascity binaries are touched
+or rebuilt. It works against any `gc events --follow` output.
 
 ### Two-stage Docker build (`containerized/Dockerfile`)
 
