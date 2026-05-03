@@ -186,7 +186,11 @@ ok "Wrapper installed at $WRAPPER_BIN"
 #       gc-docker-start.sh   / gc-docker-stop.sh      (supervisor-only swap)
 #       gc-workspace-home.py / gc-workspace-work.py   (Python API variants)
 # ---------------------------------------------------------------------------
-SCRIPTS_DIR="$(cd "$(dirname "$0")/../scripts" && pwd)"
+# Note: line 28 already did `cd "$(dirname "$0")"`, so cwd is the
+# containerized/ dir at this point. `..` = the repo root; `../scripts`
+# = the workspace launchers. Don't re-derive from $0 here — that would
+# resolve relative to the ORIGINAL caller cwd, not the post-cd one.
+SCRIPTS_DIR="$(cd ../scripts && pwd)"
 mkdir -p "$HOME/.local/bin"
 
 # Symlink table — source script → name in ~/.local/bin.
