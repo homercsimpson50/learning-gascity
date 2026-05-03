@@ -10,7 +10,8 @@
 #     comes back on next login (--enable-launchd).
 #
 # What it does NOT start:
-#   - The containerized stack (use containerized/start.sh for that).
+#   - The containerized stack (use scripts/gascity-docker-start.sh, or
+#     gc-workspace-work.sh for that + the iTerm2 layout in one shot).
 #   - Ollama (the gc-feed-ai script handles that on demand).
 #   - The iTerm2 workspace layout (use gascity-workspace.sh).
 #

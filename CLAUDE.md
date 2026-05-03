@@ -51,7 +51,7 @@ Upstream fixes need a `gc` binary upgrade — not edits here.
 - [`containerized/README.md`](containerized/README.md) — directory reference for `containerized/` (architecture, hard rules, config knobs, v1 limitations).
 - [`bootstrap.sh`](bootstrap.sh) — brand-new-machine entry for the work-machine path. Installs gc/bd/dolt/flock then hands off to `containerized/install.sh`.
 - [`upgrade.sh`](upgrade.sh) — bring everything up to date. Pulls the repo, upgrades `gc` / `bd` / `dolt` from upstream, rebuilds the agent image, refreshes the shim + workspace launchers. Idempotent.
-- [`configs/gc-CLAUDE.md`](configs/gc-CLAUDE.md) — operating recipe loaded by mayor at runtime (different audience: the agent, not the developer editing this repo).
+- [`misc/README.md`](misc/README.md) — relocated / superseded files kept for reference (former `containerized/start.sh`, former `configs/gc-CLAUDE.md`). Not part of the active install/boot flow.
 - This file — guidance for editing the repo, not for using gascity.
 
 ## Common commands (cheat sheet)

@@ -92,8 +92,7 @@ learning-gascity/
 │   ├── gascity-start.sh / -stop.sh         ← local supervisor lifecycle
 │   ├── gascity-docker-start.sh / -stop.sh  ← docker supervisor lifecycle
 │   └── gc-feed-ai                          ← textual TUI on top of `gc events --follow`
-├── configs/
-│   └── gc-CLAUDE.md    (mayor operating recipe)
+├── misc/               ← superseded / never-wired files; see misc/README.md
 └── CLAUDE.md           (guidance for Claude Code editing this repo)
 ```
 
