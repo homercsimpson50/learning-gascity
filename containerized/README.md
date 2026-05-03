@@ -15,7 +15,9 @@ containerized/
 │   ├── gc-docker-runner   bash; argv[0] picks agent, builds docker run, forwards stdio + signals
 │   ├── gc-docker          user-facing wrapper: prepends shim dir to PATH, execs gc
 │   └── config.example.toml image map, network mode, limits
-├── install.sh             docker check → image build → shim + wrapper install → verify
+├── wire-shim.sh           idempotent helper: inserts start_command into
+│                          every [[agent]] block in pack.toml/city.toml
+├── install.sh             docker check → image build → shim + wire-shim install → verify
 ├── uninstall.sh           reverse install.sh (preserves image, config, logs)
 └── verify.sh              7 isolation probes from spec §8
 ```
@@ -25,29 +27,39 @@ containerized/
 ## How an agent invocation flows
 
 ```
-You type:        gc-docker supervisor run
-                     │
-                     │  prepends ~/.local/bin/gascity-shims to its OWN PATH
-                     ▼  exec gc supervisor run
-gc-supervisor   ─►   runtime provider
-                     │
-                     │  exec("claude", …)  — supervisor inherits the wrapper's PATH
-                     ▼
+gc-docker-start.sh
+   │  (pre-flight) wire-shim.sh patches pack.toml + city.toml so every
+   │               [[agent]] block has start_command pointing at the shim
+   ▼  starts gc supervisor in the background
+gc-supervisor
+   │  decides to spawn an agent for a bead; the agent's resolved config
+   │  has start_command = "$HOME/.local/bin/gascity-shims/claude" — so
+   │  PATH lookup is skipped entirely.
+   ▼  exports GC_RIG, GC_RIG_ROOT, GC_DIR, GC_AGENT, GC_TEMPLATE, GC_BEAD_ID,
+      GC_SESSION_ID, ANTHROPIC_API_KEY, etc.
 ~/.local/bin/gascity-shims/claude  (symlink → gc-docker-runner)
-                     │
-                     │  reads ~/.config/gascity-docker-runner/config.toml,
-                     │  builds docker run with /work bind, --read-only,
-                     │  --cap-drop ALL, --user 1000:1000, etc.,
-                     ▼  forwards stdio + signals
-docker container: gascity-agent-runner:claude
-   /work     = the rig worktree (rw)
+   │  argv[0] = "claude" → image map lookup
+   │
+   │  branch on GC_RIG:
+   │    unset (city-scoped: mayor, deacon, boot)
+   │      → exec real claude (path from .real-claude sidecar). No
+   │        container. Agent runs on host with full city access.
+   │    set (rig-scoped: polecats, witness, refinery)
+   │      → docker run with /work bind = $GC_DIR (per-agent worktree),
+   │        --read-only, --cap-drop ALL, --user 1000:1000, etc.,
+   │        forwards stdio + signals.
+   ▼
+docker container: gascity-agent-runner:claude (only for rig-scoped)
+   /work     = $GC_DIR — the per-agent worktree at
+               .gc/worktrees/<rig>/polecats/<agent> (rw)
    /tmp      = tmpfs
    ~/.cache  = tmpfs
    no host SSH keys, no AWS creds, no docker socket
 ```
 
-Your interactive shell never sees the shim — only `gc-docker`'s child
-processes do.
+Your interactive shell never sees the shim — `~/.local/bin/claude` is
+the user's untouched normal claude binary. The shim is reached only
+through `gc-supervisor → start_command`.
 
 ---
 

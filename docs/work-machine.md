@@ -55,8 +55,9 @@ cd ~/code/learning-gascity
    - Builds `gascity-agent-runner:claude` from `containerized/agent-runner/`.
    - Installs the shim at `~/.local/bin/gascity-shims/gc-docker-runner`.
    - Drops the default config at `~/.config/gascity-docker-runner/config.toml`.
-   - Symlinks `claude` → `gc-docker-runner` inside the shim dir (so when the supervisor's PATH includes that dir, `claude` resolves to the shim).
+   - Symlinks `claude` → `gc-docker-runner` inside the shim dir. The shim is one binary that serves multiple agents; it reads `argv[0]` to decide which one (so `claude`, `codex`, `gemini` symlinks all point at the same binary).
    - Installs the `gc-docker` wrapper at `~/.local/bin/gc-docker`.
+   - Installs `wire-shim.sh` at `~/.local/bin/gascity-shims/wire-shim.sh`. `gc-docker-start.sh` runs it as a pre-flight on every boot to insert `start_command = "$HOME/.local/bin/gascity-shims/claude"` into every `[[agent]]` block in your city's `pack.toml`/`city.toml`. That's how gc-supervisor reaches the shim — by absolute path via `start_command`, not via PATH lookup. Idempotent.
    - Runs `verify.sh` — the seven isolation probes from the spec §8.
 
 Re-running `bootstrap.sh` is safe — every step skips itself if its

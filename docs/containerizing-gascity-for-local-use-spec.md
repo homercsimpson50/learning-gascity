@@ -73,7 +73,7 @@ Tags: one per supported agent + version, e.g. `claude-1.x`, `codex-0.y`, `gemini
 - `git`, `gh`, `jq`, `tmux`, `curl`, `ca-certificates` (the Gas City runtime expects these)
 - A non-root user `agent` (uid 1000) that owns `/work` and `/home/agent`
 - An entrypoint that:
-  1. Validates required env (`GC_RIG_PREFIX`, `GC_BEAD_ID`, `GC_AGENT_NAME`)
+  1. Validates required env (`GC_RIG`, `GC_RIG_PREFIX`, `GC_BEAD_ID`, `GC_AGENT`)
   2. `cd /work`
   3. Drops to `agent` user
   4. Execs the agent binary with the args passed through
@@ -94,9 +94,9 @@ A small Go program (or shell script if we want zero build) that lives on `$PATH`
 
 **Responsibilities:**
 1. Read its own `argv[0]` to figure out which agent to launch (`claude`, `codex`, etc.) — this lets a single binary serve all agents via symlinks
-2. Read Gas City env vars the supervisor exports: `GC_RIG_PATH`, `GC_RIG_PREFIX`, `GC_BEAD_ID`, `GC_AGENT_NAME`, `GC_SESSION_ID`
-3. Resolve the rig's worktree from `GC_RIG_PATH`
-4. Build a `docker run` invocation per the rules in §4
+2. Read Gas City env vars the supervisor exports: `GC_RIG`, `GC_RIG_ROOT`, `GC_RIG_PREFIX`, `GC_DIR`, `GC_BEAD_ID`, `GC_AGENT`, `GC_SESSION_ID` (older draft used `GC_RIG_PATH` / `GC_AGENT_NAME` — accepted as fallbacks)
+3. If `GC_RIG` is unset (city-scoped agent or interactive use), exec the real agent binary on the host (path captured into a `.real-<agent>` sidecar at install time) — no container.
+4. Otherwise: build a `docker run` invocation per the rules in §4 with `/work` bind-mounted to `GC_DIR` (the per-agent worktree gc materializes at `.gc/worktrees/<rig>/polecats/<agent>`)
 5. Forward stdin/stdout/stderr transparently (Gas City's `subprocess` provider expects this)
 6. Forward signals (SIGTERM, SIGINT) into the container so `gc stop` works
 7. Exit with the container's exit code
@@ -135,23 +135,53 @@ extra_ro = []
 
 ### 3.3 Wiring it into Gas City
 
-Per the Gas City docs, custom agent commands are configurable:
+> **Implementation note (2026-05):** This section originally proposed
+> two wirings — `gc config agent set` or PATH-prepended symlinks. The
+> implementation eventually went with neither: PATH ordering is
+> unstable on macOS (login shells re-run zprofile + path_helper, and
+> claude's auto-updater periodically rewrites `~/.local/bin/claude`),
+> and `gc config agent set` isn't a real command. The shipping wiring
+> is per-agent `start_command` in `pack.toml` / `city.toml`, automated
+> by `containerized/wire-shim.sh` running from `gc-docker-start.sh`.
+> See `containerized/README.md` "How an agent invocation flows" for
+> the current chain. The argv[0] dispatch (one shim binary serving
+> claude/codex/gemini via symlinks within `~/.local/bin/gascity-shims/`)
+> is preserved — those symlinks are reached by `start_command`'s
+> absolute path, not via PATH lookup.
+
+The original options below are kept for historical context.
+
+~~Per the Gas City docs, custom agent commands are configurable:~~
 
 ```sh
-gc config agent set claude "gc-docker-runner"
+gc config agent set claude "gc-docker-runner"   # NOT IMPLEMENTED in gc
 gc config agent set codex  "gc-docker-runner"
 gc config agent set gemini "gc-docker-runner"
 ```
 
-Or, equivalently, install symlinks earlier on `$PATH` than the real binaries:
+~~Or, equivalently, install symlinks earlier on `$PATH` than the real binaries:~~
 
 ```sh
+# Doesn't work on macOS — see implementation note above.
 ln -s /usr/local/bin/gc-docker-runner /usr/local/bin/claude
 ln -s /usr/local/bin/gc-docker-runner /usr/local/bin/codex
 ln -s /usr/local/bin/gc-docker-runner /usr/local/bin/gemini
 ```
 
-The symlink approach is preferable because it works with any Gas City config without per-city modification. It also means the same Gas Town pack runs unmodified.
+Current wiring (as shipped):
+
+```toml
+# pack.toml or city.toml — wire-shim.sh inserts these automatically
+[[agent]]
+name = "mayor"
+start_command = "$HOME/.local/bin/gascity-shims/claude"
+
+[[agent]]
+name = "claude"      # rig polecat
+scope = "rig"
+dir = "<rig-name>"
+start_command = "$HOME/.local/bin/gascity-shims/claude"
+```
 
 ---
 
@@ -162,13 +192,13 @@ The shim builds a `docker run` with these flags. Every flag has a reason — do 
 ```
 docker run \
   --rm \                                    # ephemeral
-  --name gc-${GC_AGENT_NAME}-${GC_BEAD_ID} \
+  --name gc-${GC_AGENT}-${GC_BEAD_ID} \
   --user 1000:1000 \                        # never root
   --read-only \                             # rootfs is immutable
   --tmpfs /tmp:size=512m,mode=1777 \
   --tmpfs /home/agent/.cache:size=512m \
   --workdir /work \
-  -v ${GC_RIG_PATH}:/work:rw,Z \            # rig worktree only
+  -v ${GC_DIR}:/work:rw,Z \                 # per-agent worktree only
   -v ${SECRETS_DIR}:/run/secrets:ro \       # see §5
   --network gc-agent-net \                  # custom bridge, see §6
   --memory=${LIMITS_MEMORY} \
@@ -177,11 +207,24 @@ docker run \
   --cap-drop=ALL \                          # no capabilities
   --security-opt=no-new-privileges \
   --security-opt=seccomp=default \
-  -e GC_RIG_PREFIX -e GC_BEAD_ID -e GC_AGENT_NAME -e GC_SESSION_ID \
+  -e GC_RIG -e GC_RIG_ROOT -e GC_RIG_PREFIX \
+  -e GC_AGENT -e GC_TEMPLATE -e GC_PROVIDER \
+  -e GC_BEAD_ID -e GC_SESSION_ID \
   -e GH_TOKEN -e ANTHROPIC_API_KEY -e OPENAI_API_KEY -e GOOGLE_API_KEY \
+  -e CLAUDE_API_KEY \
   ${IMAGE_DIGEST} \
   "$@"
 ```
+
+> **Implementation note (2026-05):** The original draft used
+> `GC_RIG_PATH` as both the docker-mode trigger and the mount source.
+> gc actually exports `GC_RIG` (rig name), `GC_RIG_ROOT` (rig source
+> dir), and `GC_DIR` (per-agent worktree under
+> `.gc/worktrees/<rig>/polecats/<agent>`). The shim triggers on
+> `GC_RIG` and mounts `GC_DIR` at `/work`. `GC_RIG_PATH` is still
+> accepted as a legacy fallback for both. Likewise `GC_AGENT_NAME` was
+> renamed to `GC_AGENT` upstream — the shim accepts both for the
+> container-name suffix.
 
 **What's deliberately missing:**
 - No `-v $HOME:...` of any kind. Not `~/.aws`, not `~/.ssh`, not `~/.config`. If the agent needs something from there, it's an explicit secret.
@@ -274,7 +317,7 @@ Each probe goes into a `tests/` directory as a scripted bead so we can re-run af
 Be honest about the limits so we don't oversell internally:
 
 - **Not a security boundary against malicious models.** A determined model + an unpatched container escape = host compromise. Mitigation: defense in depth via Option B (k8s + gVisor) when we move to AWS.
-- **Not portable to Windows without WSL2.** Docker Desktop on Windows runs Linux containers in WSL2; the spec works there but pathing in `GC_RIG_PATH` needs translation. Mark Windows as best-effort in v1.
+- **Not portable to Windows without WSL2.** Docker Desktop on Windows runs Linux containers in WSL2; the spec works there but pathing in `GC_DIR` needs translation. Mark Windows as best-effort in v1.
 - **Performance overhead.** Every agent invocation is a `docker run`. On macOS, that's ~1–2s of latency per session start vs subprocess. Acceptable for orchestration; would be a problem if Gas City spawned containers per tool call (it doesn't).
 - **No GPU.** If anyone wants local inference inside the agent container, that's a separate image variant with `--gpus`.
 
