@@ -62,17 +62,19 @@ def claude_log_dir(city_dir: str) -> str:
 NOISE_ACTORS = {"cache-reconcile"}
 NOISE_TYPES = {"controller.heartbeat"}
 
-# Prompt: same shape as gastown feat/agent-observability-tui, tuned for the
-# Claude-Code-conversation-heavy event stream we get here. The events list
-# now includes "user" prompts and "mayor" tool/text/thinking lines, so the
-# summary should describe the conversation, not just supervisor metadata.
+# Prompt: focus on the AGENT's actions, not the conversation. The user
+# isn't doing the work — the agents (mayor, dogs) are. So describe what
+# the agents are doing right now, treating the user's prompts as direction
+# rather than action.
 SUMMARY_PROMPT = (
-    "You are summarizing a live multi-agent coding session (Gas City). "
-    "Below are recent events: user prompts, mayor (the lead agent) "
-    "responses and tool calls, plus supervisor lifecycle events. "
-    "Write a 2-3 sentence summary of WHAT THE USER AND MAYOR ARE WORKING ON "
-    "RIGHT NOW. Mention specific topics or files when present. "
-    "Be concrete. No filler, no markdown.\n\n"
+    "You are summarizing live activity from a multi-agent coding system "
+    "(Gas City). Below are recent events: agent tool calls (Bash, Read, "
+    "Edit, Write, etc.), assistant text, and supervisor lifecycle events. "
+    "User lines are direction given to the agents, not work. "
+    "Write a 2-3 sentence summary of WHAT THE AGENTS ARE DOING right now "
+    "(start with 'Mayor is …' or '<agent-name> is …'). "
+    "Mention specific files, commands, or topics when present. "
+    "Be concrete. No filler, no markdown, never say 'the user'.\n\n"
     "Events (oldest to newest):\n{events}\n\nSummary:"
 )
 

@@ -55,7 +55,8 @@ tell application "iTerm2"
             set rightPane to (split vertically with default profile)
         end tell
 
-        -- Step 2: Split right horizontally → top-right (shell) and bottom-right (feed)
+        -- Step 2: Split right horizontally → top-right (shell, small)
+        --                                    + bottom-right (feed, big)
         tell rightPane
             set name to "shell"
             set feedPane to (split horizontally with default profile)
@@ -64,6 +65,13 @@ tell application "iTerm2"
         tell feedPane
             set name to "feed"
         end tell
+
+        -- Make the shell (top-right) small so the feed gets ~3/4 of the
+        -- right column. iTerm's session rows property does the resize
+        -- without needing Accessibility permissions.
+        try
+            tell rightPane to set rows to 8
+        end try
 
         -- Send commands. Top-right pane is left blank (just an open shell).
         tell current session
