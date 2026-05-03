@@ -86,18 +86,20 @@ for _ in $(seq 1 30); do
   sleep 2
 done
 
-# Smoke test
+# Smoke test (non-fatal — gc doctor exits non-zero on warnings, that's fine)
 echo
 echo "→ smoke test"
-docker compose exec -T gascity gc version | sed 's/^/   gc version: /'
-docker compose exec -T gascity gc doctor 2>&1 | tail -1 | sed 's/^/   gc doctor:  /'
+set +e
+docker compose exec -T gascity gc version 2>&1 | sed 's/^/   gc version: /'
+docker compose exec -T gascity bash -c 'cd /city && gc doctor' 2>&1 \
+  | tail -1 | sed 's/^/   gc doctor:  /'
 
-# Quick credential-sync check (informational, not fatal)
 if docker compose exec -T gascity test -f /home/agent/.claude/settings.json; then
   echo "   claude:     host config synced ✓"
 else
   echo "   claude:     no host config detected (run 'claude' inside the container to log in)"
 fi
+set -e
 
 cat <<'EOF'
 
