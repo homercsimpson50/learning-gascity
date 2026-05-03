@@ -343,9 +343,12 @@ class GCFeedApp(App):
         self.last_summary_at = time.time()
         self.summarizing = False
         self._tail_proc: Optional[asyncio.subprocess.Process] = None
-        self._claude_tail_proc: Optional[asyncio.subprocess.Process] = None
         self._current_claude_log: Optional[str] = None
         self.focused_panel = "events"  # or "summary"
+        # Strong refs so create_task'd coroutines don't get GC'd mid-run
+        # (which silently kills them in CPython 3.9+).
+        self._bg_tasks: list = []
+        self.claude_seen = 0
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -394,13 +397,11 @@ class GCFeedApp(App):
 
         await self._refresh_state()
         await self._load_history()
-        self.set_interval(8.0, lambda: asyncio.create_task(self._refresh_state()))
-        # Re-pick the claude log every 30s so a session restart is picked up.
-        self.set_interval(30.0, lambda: asyncio.create_task(self._maybe_repoint_claude_tail()))
+        self.set_interval(8.0, lambda: self._spawn(self._refresh_state()))
         if not DISABLED:
             self.set_interval(2.0, self._maybe_summarize_sync)
-        asyncio.create_task(self._tail_events())
-        asyncio.create_task(self._tail_claude_log())
+        self._spawn(self._tail_events())
+        self._spawn(self._tail_claude_log_safe())
 
     # --- panels ---------------------------------------------------------
 
@@ -595,6 +596,52 @@ class GCFeedApp(App):
         candidates.sort(reverse=True)
         return candidates[0][1]
 
+    def _spawn(self, coro):
+        """Wrapper around create_task that keeps a strong reference and surfaces
+        exceptions to the events log instead of swallowing them silently."""
+        task = asyncio.create_task(coro)
+        self._bg_tasks.append(task)
+        def _done(t: asyncio.Task) -> None:
+            try:
+                self._bg_tasks.remove(t)
+            except ValueError:
+                pass
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is not None:
+                try:
+                    log = self.query_one("#events", RichLog)
+                    log.write(f"[red]task error: {type(exc).__name__}: {exc}[/red]")
+                except Exception:
+                    pass
+        task.add_done_callback(_done)
+        return task
+
+    async def _tail_claude_log_safe(self) -> None:
+        """Restart the tailer if it errors out. Emit a visible line per restart
+        so a silent failure can never happen again."""
+        attempts = 0
+        while True:
+            try:
+                attempts += 1
+                if attempts > 1:
+                    try:
+                        log = self.query_one("#events", RichLog)
+                        log.write(f"[dim]── restarting claude tailer (attempt {attempts}) ──[/dim]")
+                    except Exception:
+                        pass
+                await self._tail_claude_log()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                try:
+                    log = self.query_one("#events", RichLog)
+                    log.write(f"[red]claude tailer crashed: {type(exc).__name__}: {exc}[/red]")
+                except Exception:
+                    pass
+                await asyncio.sleep(2)
+
     async def _tail_claude_log(self) -> None:
         """Native Python tail -F replacement. Avoids the line-buffering issues
         macOS BSD `tail -F` has when piped into another process. Polls for new
@@ -605,7 +652,6 @@ class GCFeedApp(App):
         inode = None
         offset = 0
         announced_path = None
-        self.claude_seen = 0
 
         try:
             while True:
@@ -677,9 +723,6 @@ class GCFeedApp(App):
             if fp is not None:
                 fp.close()
 
-    async def _maybe_repoint_claude_tail(self) -> None:
-        # No-op now — _tail_claude_log re-discovers newest file every tick.
-        return
 
     async def _do_summarize(self) -> None:
         if self.summarizing or not self.event_buf:
