@@ -61,14 +61,10 @@ def claude_log_dir(work_dir: str) -> str:
 NOISE_ACTORS = {"cache-reconcile"}
 NOISE_TYPES = {"controller.heartbeat"}
 
-# Claude tool calls to suppress in the events log AND in the AI summary
-# buffer (Claude Code's subagent-tracking internals — pure noise to a human
-# watching what an agent is *doing*).
-NOISE_CLAUDE_TYPES = {
-    "tool.Task", "tool.TaskStart", "tool.TaskStop", "tool.TaskList",
-    "tool.Monitor", "tool.SendMessage", "tool.TaskGet",
-    "tool.TaskUpdate", "tool.TaskOutput", "tool.TaskCreate",
-}
+# (Previously filtered Claude Code subagent tools (tool.Task*, tool.Monitor)
+# are now kept — the user wants visibility into mayor delegating work to
+# subagents.)
+NOISE_CLAUDE_TYPES: set = set()
 
 SUMMARY_PROMPT = (
     "You are summarizing live activity from a multi-agent coding system "
