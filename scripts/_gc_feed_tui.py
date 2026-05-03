@@ -27,7 +27,9 @@ Keys:
 import asyncio
 import json
 import os
+import shutil
 import sys
+import textwrap
 import time
 import urllib.request
 from collections import deque
@@ -308,11 +310,11 @@ class GCFeedApp(App):
     #sessions { height: 50%; }
     #beads { height: 50%; }
 
-    #events_panel { height: 1fr; }
-    #summary_panel { height: 14; border-top: solid $warning; }
-
-    #events { height: 1fr; }
-    #summary { height: 1fr; }
+    /* Right column: events fills the available space, summary takes a
+       fixed 12-row bottom strip. No nested wrappers — those collapse
+       to zero height when the parent Vertical can't compute children. */
+    #events  { height: 1fr; }
+    #summary { height: 12; border-top: solid $warning; }
 
     .focused { border: heavy $success; }
     """
@@ -358,16 +360,14 @@ class GCFeedApp(App):
                 yield DataTable(id="sessions", zebra_stripes=True)
                 yield DataTable(id="beads", zebra_stripes=True)
             with Vertical(id="right"):
-                with Vertical(id="events_panel"):
-                    yield RichLog(
-                        id="events", highlight=False, markup=True,
-                        wrap=False, max_lines=2000,
-                    )
-                with Vertical(id="summary_panel"):
-                    yield RichLog(
-                        id="summary", highlight=False, markup=True,
-                        wrap=True, max_lines=200,
-                    )
+                yield RichLog(
+                    id="events", highlight=False, markup=True,
+                    wrap=False, max_lines=2000,
+                )
+                yield RichLog(
+                    id="summary", highlight=False, markup=True,
+                    wrap=True, max_lines=400,
+                )
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -407,7 +407,7 @@ class GCFeedApp(App):
 
     def _set_summary_visible(self, on: bool) -> None:
         try:
-            panel = self.query_one("#summary_panel", Vertical)
+            panel = self.query_one("#summary", RichLog)
             panel.styles.display = "block" if on else "none"
         except Exception:
             pass
@@ -728,6 +728,17 @@ class GCFeedApp(App):
                 fp.close()
 
 
+    def _summary_wrap_width(self) -> int:
+        """Best estimate of how wide the summary widget can render. Keeps
+        manual wrapping conservative if the widget hasn't laid out yet."""
+        try:
+            w = self.query_one("#summary", RichLog).size.width
+            if w and w > 10:
+                return max(20, w - 2)
+        except Exception:
+            pass
+        return max(40, shutil.get_terminal_size((80, 24)).columns - 50)
+
     async def _do_summarize(self) -> None:
         if self.summarizing or not self.event_buf:
             return
@@ -744,7 +755,14 @@ class GCFeedApp(App):
             summary_w.write(
                 f"[b yellow]{ts}[/b yellow] [dim]({secs:.1f}s, {tokens}t, n={len(snapshot)})[/dim]"
             )
-            summary_w.write(text or "(no response)")
+            # Hard-wrap the body so long sentences can't run off the right
+            # edge of the panel — RichLog's internal wrap=True still
+            # sometimes overflows in narrow iTerm splits.
+            width = self._summary_wrap_width()
+            for line in (text or "(no response)").splitlines() or [""]:
+                wrapped = textwrap.wrap(line, width=width) or [""]
+                for w in wrapped:
+                    summary_w.write(w)
             summary_w.write("")  # spacer
         self.summarizing = False
 
