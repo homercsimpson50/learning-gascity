@@ -55,7 +55,7 @@ services:
       GIT_USER:   ${GIT_USER:-TestUser}
       GIT_EMAIL:  ${GIT_EMAIL:-test@example.com}
       # Coding-agent runtime registered into the city. See `gc init --help`.
-      GC_PROVIDER: ${GC_PROVIDER:-claude-code}
+      GC_PROVIDER: ${GC_PROVIDER:-claude}
 
     volumes:
       # Workspace root where the city is initialized (persistent volume).

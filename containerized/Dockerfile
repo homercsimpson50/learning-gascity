@@ -80,6 +80,15 @@ RUN chmod +x /usr/local/bin/gc
 RUN mkdir -p /city /city/.gc /city/.dolt-data \
     && chown -R agent:agent /city
 
+# Pre-create /home/agent/.config so the bind mount of ~/.config/gh doesn't
+# create the parent dir as root (which would block the entrypoint from
+# writing /home/agent/.config/gh/hosts.yml). Same for .local subpaths the
+# Claude Code state volumes mount under.
+RUN mkdir -p /home/agent/.config \
+            /home/agent/.local/state/claude \
+            /home/agent/.local/share/claude \
+    && chown -R agent:agent /home/agent/.config /home/agent/.local
+
 # PATH + terminal env for both shells (so `gc` works in interactive `exec`
 # sessions without sourcing anything).
 RUN echo 'export PATH="/usr/local/bin:$PATH"' >> /etc/profile.d/gascity.sh && \

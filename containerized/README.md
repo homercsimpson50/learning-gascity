@@ -112,7 +112,7 @@ All defaults work. Set in `.env`:
 |---|---|---|
 | `GIT_USER` | `TestUser` | git + dolt user.name (idempotent each start) |
 | `GIT_EMAIL` | `test@example.com` | Same for user.email |
-| `GC_PROVIDER` | `claude-code` | Coding-agent runtime registered into the city. Other valid values: `codex`, `gemini`, `exec` (see `gc init --help`) |
+| `GC_PROVIDER` | `claude` | Coding-agent runtime registered into the city. Other valid values: `codex`, `gemini`, `cursor`, `copilot`, `amp`, `opencode`, `auggie`, `pi`, `omp` (see `gc init --help`) |
 | `GASCITY_REPO` | `https://github.com/gastownhall/gascity.git` | Source repo to build from |
 | `GASCITY_REF` | `main` | Tag, branch, or SHA to check out |
 | `GASCITY_IMAGE_TAG` | `latest` | Image tag — bump to keep versions side by side |

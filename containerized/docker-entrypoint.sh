@@ -67,11 +67,30 @@ if [ -d "$GH_HOST" ] && [ -f "$GH_HOST/hosts.yml" ]; then
 fi
 
 # --- 5. One-time city scaffold via `gc init` ---
+# `--skip-provider-readiness` prevents gc init from failing when Claude
+# Code (or whichever provider) isn't yet authenticated inside the
+# container. The first time you want to use the agent, run
+# `docker compose exec gascity claude auth login` to authenticate.
+#
+# Backwards-compat: an earlier version of this image used "claude-code" as
+# the provider name. The actual gascity flag value is "claude" — translate
+# silently so old .env files don't break the boot.
+PROVIDER="${GC_PROVIDER:-claude}"
+if [ "$PROVIDER" = "claude-code" ]; then
+    echo "[entrypoint] note: GC_PROVIDER=claude-code is legacy; using claude"
+    PROVIDER=claude
+fi
 if [ ! -f /city/city.toml ]; then
-    echo "[entrypoint] Initializing Gas City workspace at /city (provider=${GC_PROVIDER:-claude-code})..."
-    cd /city && gc init --provider "${GC_PROVIDER:-claude-code}" .
+    echo "[entrypoint] Initializing Gas City workspace at /city (provider=$PROVIDER)..."
+    cd /city && gc init --provider "$PROVIDER" --skip-provider-readiness .
 else
     echo "[entrypoint] Gas City workspace already initialized at /city."
 fi
+
+# Register the city with the machine-wide supervisor so `gc cities` lists
+# it. Idempotent — safe to run on every start. Failure is non-fatal because
+# the supervisor may not be up yet on the very first boot.
+echo "[entrypoint] Registering city with the supervisor..."
+cd /city && gc register . 2>&1 || true
 
 exec "$@"
