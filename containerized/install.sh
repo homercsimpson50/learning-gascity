@@ -135,17 +135,23 @@ ok "Wrapper installed at $WRAPPER_BIN"
 # ---------------------------------------------------------------------------
 SCRIPTS_DIR="$(cd "$(dirname "$0")/../scripts" && pwd)"
 mkdir -p "$HOME/.local/bin"
-for src in gascity-docker-workspace.sh gascity-docker-start.sh gascity-docker-stop.sh; do
+
+# Symlink table — source script → name in ~/.local/bin.
+# Note: the bare 'gc-workspace.sh' is intentionally NOT linked. With
+# explicit home/work wrappers, an unqualified name is ambiguous.
+declare -a SYMS=(
+    "gascity-docker-start.sh:gc-docker-start.sh"
+    "gascity-docker-stop.sh:gc-docker-stop.sh"
+    # Mode-swap wrappers — swap supervisors then open the right workspace.
+    "gascity-workspace-home.sh:gc-workspace-home.sh"
+    "gascity-workspace-work.sh:gc-workspace-work.sh"
+    "gascity-workspace-home.py:gc-workspace-home.py"
+    "gascity-workspace-work.py:gc-workspace-work.py"
+)
+for entry in "${SYMS[@]}"; do
+    src="${entry%%:*}"
+    link_name="${entry##*:}"
     if [ -f "$SCRIPTS_DIR/$src" ]; then
-        # Symlink names: drop the `gascity-` prefix (so 'gc-workspace.sh',
-        # 'gc-docker-start.sh', 'gc-docker-stop.sh').
-        link_name="${src#gascity-}"
-        # Keep workspace as gc-workspace.sh (no 'docker-' prefix; only one workspace flavor lives in ~/.local/bin).
-        if [ "$src" = gascity-docker-workspace.sh ]; then
-            link_name="gc-workspace.sh"
-        else
-            link_name="gc-${src#gascity-}"
-        fi
         ln -sf "$SCRIPTS_DIR/$src" "$HOME/.local/bin/$link_name"
         ok "Symlinked ~/.local/bin/$link_name → $SCRIPTS_DIR/$src"
     else
@@ -181,21 +187,25 @@ cat <<EOF
        gc-docker supervisor run  # foreground supervisor — agents in containers
        gc-docker init ~/test     # any gc subcommand works through the wrapper
 
-   For day-to-day use, the iTerm2 workspace launcher gives you the
-   supervisor + shell + events feed in one window with a desert color
-   scheme so you can't mix it up with the local one:
+   For day-to-day use, two single-command wrappers swap supervisors
+   AND open the right iTerm2 workspace:
 
-       gc-workspace.sh           # plain feed
-       gc-workspace.sh --ai      # bottom pane runs gc-feed-ai
+       gc-workspace-work.sh      # ↻ to docker, open desert workspace
+       gc-workspace-home.sh      # ↻ to local,  open home  workspace
 
-   Make sure $(dirname "$WRAPPER_BIN") is on your PATH so 'gc-docker'
-   and 'gc-workspace.sh' resolve. (It already is if 'gc' resolves,
-   since gc lives in the same dir for most installs.)
+   Or just swap the supervisor without opening a workspace:
+
+       gc-docker-start.sh                      # ↻ to docker
+       gc-docker-stop.sh --restart-local       # ↻ to local
+
+   Make sure $(dirname "$WRAPPER_BIN") is on your PATH so these
+   resolve. (It already is if 'gc' resolves, since gc lives in the
+   same dir for most installs.)
 
    Verify:
-       which gc-docker           # should print $WRAPPER_BIN
-       which gc-workspace.sh     # should print $HOME/.local/bin/gc-workspace.sh
-       which claude              # should still be your normal claude
+       which gc-docker             # should print $WRAPPER_BIN
+       which gc-workspace-work.sh  # should print $HOME/.local/bin/gc-workspace-work.sh
+       which claude                # should still be your normal claude
 
    To remove this setup:  ./uninstall.sh
 EOF

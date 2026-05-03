@@ -120,18 +120,22 @@ idempotent and the cleanest swap-back path.
 
 ### Swapping between local and docker
 
-You can only run one supervisor at a time per machine. Both start
-scripts know about each other and will swap cleanly:
+You can only run one supervisor at a time per machine. Two
+single-command wrappers do the swap *and* open the right workspace:
 
 ```bash
-# Sitting in local mode, want to test docker:
-gc-docker-start.sh    # auto-stops local first, then brings docker up
+gc-workspace-work.sh    # ↻ swap to docker, open docker workspace (desert)
+gc-workspace-home.sh    # ↻ swap to local,  open local  workspace
+```
 
-# Done with docker, want local back:
-gc-docker-stop.sh --restart-local
+Each one auto-stops the other supervisor first, brings its own up,
+waits for the mayor session, and then opens its iTerm2 layout. Idempotent.
 
-# Or skip the wrapper script and let gascity-start.sh swap for you:
-~/code/learning-gascity/scripts/gascity-start.sh   # auto-stops docker first
+If you just want the swap without opening a workspace:
+
+```bash
+gc-docker-start.sh                       # ↻ to docker (auto-stops local)
+gc-docker-stop.sh --restart-local        # ↻ to local
 ```
 
 ### Bare commands (no workspace)

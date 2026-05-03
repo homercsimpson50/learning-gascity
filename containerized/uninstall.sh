@@ -31,8 +31,14 @@ rmdir "$SHIM_BIN_DIR" 2>/dev/null || true
 rm -f "$WRAPPER_BIN" \
       "$HOME/.local/bin/gc-workspace.sh" \
       "$HOME/.local/bin/gc-docker-start.sh" \
-      "$HOME/.local/bin/gc-docker-stop.sh"
-ok "Shim, wrapper, workspace, and start/stop launchers removed"
+      "$HOME/.local/bin/gc-docker-stop.sh" \
+      "$HOME/.local/bin/gc-workspace-home.sh" \
+      "$HOME/.local/bin/gc-workspace-work.sh" \
+      "$HOME/.local/bin/gc-workspace-home.py" \
+      "$HOME/.local/bin/gc-workspace-work.py"
+ok "Shim, wrapper, start/stop, and mode-swap launchers removed"
+# (gc-workspace.sh deliberately removed too — it was the old ambiguous
+# alias; explicit gc-workspace-home/work scripts replace it.)
 
 # Shell rc cleanup — strip any leftover marker-fenced PATH block.
 detect_rc() {

@@ -136,17 +136,22 @@ gc supervisor stop              # stop everything
 ### Swapping with the work-machine (Docker) flow on the same laptop
 
 If you're occasionally testing the containerized setup
-([work-machine.md](work-machine.md)) on this same machine, the start
-scripts know about each other and will swap cleanly:
+([work-machine.md](work-machine.md)) on this same machine, two
+single-command wrappers do the swap *and* open the right workspace:
 
 ```bash
-# Sitting in local mode, want to test docker:
-gc-docker-start.sh                       # auto-stops local first, then brings docker up
+gc-workspace-home.sh    # ↻ swap to local,  open local  workspace
+gc-workspace-work.sh    # ↻ swap to docker, open docker workspace (desert)
+```
 
-# Done with docker, want local back:
-gc-docker-stop.sh --restart-local        # one command, both halves
-# or:
-~/code/learning-gascity/scripts/gascity-start.sh   # also auto-stops docker first
+Each one auto-stops the other supervisor first, brings its own up,
+waits for the mayor session, and then opens its iTerm2 layout. Idempotent.
+
+If you just want the supervisor swap without opening a workspace:
+
+```bash
+gc-docker-start.sh                       # ↻ to docker (auto-stops local)
+gc-docker-stop.sh --restart-local        # ↻ to local
 ```
 
 ---
