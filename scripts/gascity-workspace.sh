@@ -36,7 +36,7 @@ if [ "$USE_AI" -eq 1 ] && [ ! -x "$SCRIPT_DIR/gc-feed-ai" ]; then
     exit 1
 fi
 
-LOCAL_MAYOR="cd ~/gc && echo 'Starting local Gas City...' && gc supervisor start 2>/dev/null; gc session attach mayor"
+LOCAL_MAYOR="cd ~/gc && $SCRIPT_DIR/gascity-start.sh && gc session attach mayor"
 if [ "$USE_AI" -eq 1 ]; then
     EVENT_FEED="cd ~/gc && $SCRIPT_DIR/gc-feed-ai"
 else
