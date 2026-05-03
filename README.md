@@ -12,6 +12,40 @@ preference. Each how-to is self-contained.
 Both how-tos start from "brand-new machine," walk through prereqs,
 install, and daily use. Pick one and follow it.
 
+## Brand-new machine
+
+```bash
+git clone https://github.com/homercsimpson50/learning-gascity ~/code/learning-gascity
+cd ~/code/learning-gascity
+./bootstrap.sh
+```
+
+Prereqs: **git** + **Docker Desktop** (for the work-machine path) + **iTerm2**.
+Everything else (Homebrew, gc, bd, dolt, flock, the agent image, the
+shim, the workspace launchers) is auto-installed.
+
+## Upgrading later
+
+```bash
+cd ~/code/learning-gascity
+./upgrade.sh                 # full upgrade
+./upgrade.sh --no-image      # skip docker image rebuild (faster)
+```
+
+`upgrade.sh` pulls the repo, upgrades `gc` / `bd` / `dolt` from
+upstream, rebuilds the agent image (so its `npm install -g
+@anthropic-ai/claude-code` picks up the latest), and refreshes the
+shim + workspace launchers. Idempotent — anything already current is a
+no-op.
+
+## Wrapper-only invariant
+
+Nothing in this repo forks, vendors, or patches upstream gascity or
+Claude Code. Everything here is install scripts, container recipes,
+shims, and workspace launchers built **on top of** upstream binaries
+fetched at install time. That's the deal: brand-new machine →
+`bootstrap.sh` → upstream binaries plus our wrapper layer.
+
 ---
 
 ## What is Gas City?

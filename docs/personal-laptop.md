@@ -162,6 +162,30 @@ gc-docker-stop.sh --restart-local        # ↻ to local
 
 ---
 
+## Updating later
+
+To pick up new gascity / bd / dolt releases:
+
+```bash
+cd ~/code/learning-gascity
+./upgrade.sh --no-image      # local flow doesn't use the agent image, so skip its rebuild
+```
+
+`upgrade.sh` will:
+1. `git pull` this repo.
+2. `brew upgrade` gascity and dolt (if installed via brew).
+3. Re-run the upstream `bd` install script.
+4. Refresh the workspace launcher symlinks.
+
+After upgrade, restart the supervisor so the new `gc` is in charge:
+
+```bash
+~/code/learning-gascity/scripts/gascity-stop.sh
+~/code/learning-gascity/scripts/gascity-start.sh
+```
+
+---
+
 ## Troubleshooting
 
 **`gc doctor` says `custom-types:city` failed**

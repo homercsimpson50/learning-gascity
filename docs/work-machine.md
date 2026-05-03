@@ -176,6 +176,40 @@ What this **doesn't** give you — be honest about the limit:
 
 ---
 
+## Updating later
+
+To pick up new gascity releases, new bd, or refresh the agent image
+with the latest Claude Code:
+
+```bash
+cd ~/code/learning-gascity
+./upgrade.sh                 # full: repo + gc + bd + dolt + image rebuild + shim re-install
+./upgrade.sh --no-image      # skip the docker image rebuild (fast)
+```
+
+`upgrade.sh` is a no-op for anything already current, so you can run it
+whenever you suspect you're behind. After a successful upgrade, swap
+the supervisor so the new `gc` is in charge:
+
+```bash
+gc-workspace-work.sh         # picks up the new supervisor + reopens workspace
+```
+
+What `upgrade.sh` does, in order:
+
+1. `git pull --ff-only` on this repo (stops if you have uncommitted changes).
+2. `brew upgrade gastownhall/gascity/gascity` (if `gc` was installed via brew).
+3. `brew upgrade dolt`.
+4. Re-runs the upstream `bd` install script — replaces `bd` with the latest.
+5. Rebuilds `gascity-agent-runner:claude` with `--no-cache` (so the
+   `npm install -g @anthropic-ai/claude-code` step picks up the latest
+   release at registry.npmjs.org).
+6. Re-runs `containerized/install.sh --no-build --no-verify` to refresh
+   the shim, wrapper, and workspace symlinks in `~/.local/bin/` against
+   any script changes from the pull.
+
+---
+
 ## Verifying isolation (any time)
 
 ```bash

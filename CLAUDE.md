@@ -9,6 +9,25 @@ This repo is a **harness** for upstream
 lives upstream — never vendored here. There is no Go/Python/JS code to lint
 or test.
 
+### Wrapper-only invariant — DO NOT BREAK
+
+Everything here is a wrapper on top of upstream binaries:
+
+- **`gc`** is installed via `brew install gastownhall/gascity/gascity` (host) or pulled in during the agent image build.
+- **`bd`** is installed via the official Steve Yegge install script.
+- **Claude Code** in the agent image is installed via `npm install -g @anthropic-ai/claude-code`.
+
+When fixing problems, **never patch upstream source**. Don't vendor
+gascity. Don't fork it. Don't write a Go `replace` directive. If
+something is broken in `gc` itself, the fix lands upstream and we pick
+it up via `./upgrade.sh`. What lives HERE is: install scripts,
+container recipes, shims that wrap (not modify) the upstream binary,
+and workspace launchers.
+
+This invariant is what makes `./bootstrap.sh` clean — a brand-new
+machine gets upstream binaries plus our wrapper layer, with zero
+modifications to anyone else's code.
+
 **Two user-facing paths, each with its own how-to:**
 
 - [`docs/personal-laptop.md`](docs/personal-laptop.md) — local install, `gc` and agents both on host. The `scripts/` directory holds the helpers (iTerm2 workspace, gc-feed-ai). Use when the user is on a throwaway / personal machine.
