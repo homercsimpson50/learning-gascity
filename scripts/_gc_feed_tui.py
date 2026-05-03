@@ -697,10 +697,16 @@ class GCFeedApp(App):
                     continue
 
                 # Read and parse any new lines.
+                # NOTE: must use `readline()` not `for line in fp:` — text-mode
+                # iteration uses readahead buffering that disables `tell()`,
+                # which is exactly the offset we need to track.
                 fp.seek(offset)
-                for line in fp:
+                while True:
+                    line = fp.readline()
+                    if not line:
+                        break  # EOF (no more data right now)
                     if not line.endswith("\n"):
-                        # incomplete tail; revert and wait for more
+                        # incomplete tail; don't advance offset, retry next tick
                         break
                     offset = fp.tell()
                     line = line.strip()
@@ -715,8 +721,6 @@ class GCFeedApp(App):
                         log.write(fmt_claude_event(ev))
                         self.event_buf.append(ev)
                         self.events_since_summary += 1
-                else:
-                    offset = fp.tell()
 
                 await asyncio.sleep(0.25)
         finally:
