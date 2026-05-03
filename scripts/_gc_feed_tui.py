@@ -57,16 +57,10 @@ def claude_log_dir(work_dir: str) -> str:
     return os.path.expanduser(f"~/.claude/projects/{encoded}")
 
 
-# Actors and event types to skip in the gc-events stream (low signal).
+# Show everything *except* the explicitly noisy types/prefixes below.
 NOISE_ACTORS = {"cache-reconcile"}
-NOISE_TYPES = {"controller.heartbeat"}
-
-# Type-prefix filters: any event whose `type` starts with one of these is
-# dropped at ingest. User keeps only direction (user.prompt) + supervisor
-# lifecycle (session/agent/mail/controller events). Mayor's free-form
-# responses (assistant.text/thinking) are filtered — the AI summary panel
-# already captures their gist; the raw text was eating screen real estate.
-NOISE_TYPE_PREFIXES = ("bead.", "tool.", "assistant.")
+NOISE_TYPES = {"controller.heartbeat", "user.prompt"}
+NOISE_TYPE_PREFIXES = ("session.",)
 
 SUMMARY_PROMPT = (
     "You are summarizing live activity from a multi-agent coding system "
@@ -84,15 +78,17 @@ SUMMARY_PROMPT = (
 
 # --- event formatting -------------------------------------------------------
 
-# Standard column widths for both gc events and claude events. Same shape
-# = aligned columns in the events log.
+# Standard column widths for both gc events and claude events.
+# Layout: ts | actor | message | [type]   — type is moved to the right
+# so the message gets the prime real estate and the type sits as a
+# trailing annotation.
 COL_ACTOR = 10
-COL_TYPE = 22
 
 def _fmt_row(ts: str, actor: str, typ: str, msg: str, actor_color: str = "white") -> str:
     return (f"[dim]{ts}[/dim] "
             f"[{actor_color}]{actor:<{COL_ACTOR}}[/{actor_color}] "
-            f"[cyan]{typ:<{COL_TYPE}}[/cyan] {msg}")
+            f"{msg} "
+            f"[dim cyan]\\[{typ}][/dim cyan]")
 
 
 def fmt_event(ev: dict) -> str:
@@ -121,7 +117,7 @@ def fmt_event(ev: dict) -> str:
     if msg and msg != subject:
         extras.append(f"[dim]({msg})[/dim]")
 
-    return _fmt_row(ts, actor[:COL_ACTOR], typ[:COL_TYPE], " ".join(extras))
+    return _fmt_row(ts, actor[:COL_ACTOR], typ, " ".join(extras))
 
 
 def fmt_event_for_prompt(ev: dict) -> str:
@@ -256,7 +252,7 @@ def fmt_claude_event(ev: dict) -> str:
         "user":  "magenta",
         "tool":  "blue",
     }.get(actor, "white")
-    return _fmt_row(ts, actor[:COL_ACTOR], typ[:COL_TYPE], msg, color)
+    return _fmt_row(ts, actor[:COL_ACTOR], typ, msg, color)
 
 
 # --- gc helpers ------------------------------------------------------------
