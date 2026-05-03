@@ -37,7 +37,25 @@ Upstream fixes need a `gc` binary upgrade — not edits here.
 
 For full flows see the how-tos above. Quick reference:
 
-### Containerized
+### One-shot workspace launchers (PATH-installed shortcuts)
+
+`scripts/gascity-workspace-{home,work}.{sh,py}` are the user-facing
+entry points. They're symlinked into `~/.local/bin/` as `gc-workspace-*`,
+so they work from any cwd:
+
+```bash
+gc-workspace-home.sh           # ↻ stop docker supervisor (if up), start local,
+                               #   open iTerm2 layout against ~/gc
+gc-workspace-home.sh --ai      # same, feed pane runs gc-feed-ai (Ollama)
+gc-workspace-work.sh           # ↻ stop local supervisor (if up), start docker,
+                               #   open iTerm2 layout against the gc-docker stack
+```
+
+Each "-home"/"-work" wrapper auto-swaps the supervisor before opening
+its layout, so you never have both running. `.py` variants exist for
+both and use the iTerm2 Python API (Magic must be enabled).
+
+### Containerized (work-machine path)
 
 ```bash
 ./bootstrap.sh                          # brand-new machine (installs everything)
@@ -45,19 +63,20 @@ cd containerized && ./install.sh        # already-set-up machine (just the conta
 cd containerized && ./verify.sh         # 7 isolation probes from spec §8
 cd containerized && ./uninstall.sh      # reverse install.sh
 gc-docker supervisor run                # foreground supervisor with sandboxed agents
+gc-docker-start.sh / gc-docker-stop.sh  # symmetric lifecycle for the docker supervisor
 ls ~/.local/state/gascity-docker-runner/logs/   # session logs (teed by the shim)
 ```
 
-### Local
+### Local (personal-laptop path)
 
 ```bash
-./scripts/gascity-workspace.sh        # AppleScript: opens 4-pane iTerm2 layout
-./scripts/gascity-workspace.sh --ai   # same, feed pane uses Ollama summary
-./scripts/gascity-workspace.py        # iTerm2 Python API equivalent (--ai works)
+gascity-start.sh / gascity-stop.sh    # symmetric lifecycle for the local supervisor
+                                      # (start.sh auto-stops the docker supervisor first)
 gc doctor / gc status / gc cities     # standard gc commands
-gc session attach mayor               # talk to the mayor
+gc session attach mayor               # talk to the mayor (also what -home opens)
 gc events --follow                    # live JSON event stream
-./scripts/gc-feed-ai                  # rich TUI on top of gc events --follow
+./scripts/gc-feed-ai                  # rich textual TUI: rigs/sessions panes,
+                                      # events log, periodic Ollama summary
 ./scripts/gc-feed-ai --simple         # stdlib-only streaming fallback
 ```
 
@@ -67,23 +86,39 @@ the personal-laptop path.
 
 ## Architecture
 
-### Local install layout (`~/gc`, `~/.gc`, `scripts/`)
+### Filesystem layout (where things actually live)
 
-The local setup mirrors the gastown convention (`~/gt`):
+```
+~/gc/                                 the city (`gc init` output) — city.toml,
+                                      pack.toml, agents/, formulas/, orders/,
+                                      overlays/, .gc/ runtime, .beads/ store.
+~/.gc/                                machine-wide supervisor state:
+                                      cities.toml registry, supervisor.log,
+                                      supervisor.lock, events.jsonl.
+                                      (NOT the same as ~/gc/.gc/)
+~/Library/LaunchAgents/
+  com.gascity.supervisor.plist        launchd autostart for the local supervisor.
 
-- `~/gc/` — the **city directory**. Created by `gc init --provider claude .`
-  (note: local `gc` v1.0.1 names the provider `claude`, not `claude-code`).
-  Contains `city.toml`, `pack.toml`, `.gc/` runtime, `.beads/` dolt-backed
-  bead store, and the `agents/`, `formulas/`, `orders/`, `overlays/`
-  subdirs.
-- `~/.gc/` — the **machine-wide supervisor state**: `cities.toml` (registry
-  of all local cities), `supervisor.log`, `supervisor.lock`, `events.jsonl`.
-  Don't confuse this with `~/gc/.gc/` — the latter is the city's own runtime.
-- `~/Library/LaunchAgents/com.gascity.supervisor.plist` — launchd autostart,
-  installed by `gc start` / `gc init`. Survives reboots.
+~/.local/bin/                         user-PATH dir; everything below is on PATH:
+  gc-docker                           opt-in wrapper: PATH=$shims:$PATH gc "$@"
+  gc-docker-start.sh →                the docker supervisor lifecycle
+  gc-docker-stop.sh  →                  (symlinks back to scripts/)
+  gc-workspace-home.{sh,py} →         iTerm2 launchers for each path
+  gc-workspace-work.{sh,py} →           (symlinks back to scripts/)
+  gascity-shims/
+    gc-docker-runner                  the actual shim (built by install.sh)
+    claude → gc-docker-runner         shim is selected by argv[0]
+~/.config/gascity-docker-runner/
+  config.toml                         shim config: image map, network, limits
+~/.local/state/gascity-docker-runner/
+  supervisor.pid                      pidfile used by gascity-{,docker-}start.sh
+                                      to detect the "other" supervisor for swap
+  logs/<session-id>.log               teed agent session logs
+```
 
 `gc init` is interactive by default; pass `--provider claude` to
 non-interactively scaffold + register + bring up the city in one shot.
+Local `gc` names the provider `claude`, not `claude-code`.
 
 **bd version gotcha**: gascity v1.0.1 expects `bd` ≥ 1.0.3. Older `bd`
 (1.0.0) silently rejects the city's custom issue types (`session`, `agent`,
@@ -92,22 +127,35 @@ session`, which surfaces as the supervisor's mayor session staying in
 `reserved-unmaterialized`. Fix: re-run the `bd` install script
 (`curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash`).
 
-### iTerm2 workspace layout (`scripts/gascity-workspace.{sh,py}`)
+### iTerm2 workspace layouts (`scripts/`)
 
-Three panes, simpler than the gastown 4-pane original:
+The repo ships **two** iTerm2 layouts — one per machine path — plus a
+shared "switcher" pair that wraps them with auto-swap of the supervisor:
 
-- Left tall pane: `cd ~/gc && gc supervisor start; gc session attach mayor`
-- Top-right pane: blank interactive shell — no command sent
-- Bottom-right pane: `gc events --follow` (or `gc-feed-ai` with `--ai`)
+| Script | Purpose | PATH alias |
+|---|---|---|
+| `gascity-workspace.{sh,py}` | bare local layout against `~/gc` | — |
+| `gascity-docker-workspace.{sh,py}` | bare docker layout (desert palette) | — |
+| `gascity-workspace-home.{sh,py}` | stop docker → start local → open local layout | `gc-workspace-home.{sh,py}` |
+| `gascity-workspace-work.{sh,py}` | stop local → start docker → open docker layout | `gc-workspace-work.{sh,py}` |
 
-Both scripts produce the same layout — `.sh` uses AppleScript via
-`osascript`, `.py` uses the iTerm2 Python API (which must be enabled in
-iTerm2 → Preferences → General → Magic). Both accept `--ai`.
+Both layouts produce three panes: left tall = mayor session, top-right =
+blank shell, bottom-right wide = events feed (`gc events --follow` or
+`gc-feed-ai` with `--ai`). The `.sh` variants drive iTerm2 via AppleScript
+(`osascript`); the `.py` variants use the iTerm2 Python API (requires
+"Enable Python API" in iTerm2 → Settings → General → Magic).
 
-**`SCRIPT_DIR` resolution**: the `.sh` deliberately uses `${BASH_SOURCE[0]}`
-not `$0`, so it works even if accidentally sourced (when sourced, `$0` is
-the parent shell's argv[0] and `dirname` gives a wrong dir, which produced
-a silent path bug in an earlier revision).
+**Auto-swap mechanics:** `gascity-start.sh` checks for a Docker-supervisor
+pidfile at `~/.local/state/gascity-docker-runner/supervisor.pid` before
+starting the local one and stops the docker side first if needed. The
+docker side has the symmetric check via `gascity-docker-start.sh`. So the
+`-home`/`-work` switchers never need to know about the other path —
+`gascity-{,docker-}start.sh` handle the handoff transparently.
+
+**`SCRIPT_DIR` resolution**: the `.sh` files use `${BASH_SOURCE[0]}`
+(not `$0`) so they resolve correctly when invoked via the symlinks in
+`~/.local/bin/` or when accidentally sourced. Earlier revisions used
+`$0` and silently broke on sourcing.
 
 ### `scripts/gc-feed-ai` (the "--ai" feed)
 
