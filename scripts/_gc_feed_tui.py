@@ -1,27 +1,27 @@
 #!/usr/bin/env python3
 """
-_gc_feed_tui.py — textual TUI for `gc events`, with periodic Ollama summary.
-
-Wrapper-only — never touches the gc binary. Same behavior the user
-previously got by patching gastown's feed (branch feat/agent-observability-tui),
-re-implemented as an external process that subscribes to `gc events
---follow` and shells out to Ollama.
+_gc_feed_tui.py — textual TUI for `gc events` + Claude Code session logs,
+with periodic Ollama summary. Wrapper-only — never touches the gc binary.
 
 Layout:
-  ┌─ header (city, supervisor status, buffer counters) ────┐
-  ├─ sessions table  ┬─ events log (scrollable)            ┤
-  ├─ beads table     │                                     │
-  ├──────────────────┼─ AI summary stream (scrollable, ────┤
-  │                  │  newest at bottom, focusable)       │
-  └──────────────────┴─────────────────────────────────────┘
+  ┌─ header (city, supervisor, counters) ──────────────────────────┐
+  ├─ Rigs (top-left)        │ events log (right top)               │
+  │   (all rigs)            │  scrollable, follows the active rig  │
+  │   gc (HQ)               │                                      │
+  │   foo                   ├─ AI summary (right bottom) ──────────┤
+  ├─ Mayor's todos (bot-left)│  rolling, follows the active rig    │
+  └────────────────────────────────────────────────────────────────┘
 
 Keys:
-  q quit
-  s toggle AI summary panel
-  a force a summary right now
-  r refresh sessions/beads tables
-  tab cycle focus (events ↔ summary)
-  ↑/↓/j/k scroll focused panel
+  q            quit
+  s            toggle AI summary panel
+  a            force a summary right now
+  r            refresh rigs/todos
+  tab          cycle focus  (rigs ↔ events ↔ summary)
+  ↑/↓ / j/k    move highlight in the rigs table OR scroll a panel
+  enter        switch the right panels to the highlighted rig
+  pageup/dn    scroll faster
+  home/end     scroll to top / bottom
 """
 
 import asyncio
@@ -33,7 +33,7 @@ import textwrap
 import time
 import urllib.request
 from collections import deque
-from typing import Optional, List
+from typing import Optional, List, Dict, Tuple
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -50,22 +50,17 @@ DISABLED = os.environ.get("GC_FEED_AI_DISABLE", "0") == "1"
 HISTORY_SINCE = os.environ.get("GC_FEED_AI_HISTORY", "1h")
 BUF_MAX = 80
 
-# Claude Code session log location. Each project gets a directory under
-# ~/.claude/projects/ named with the project path encoded as -Users-homer-gc.
-# The active session is the JSONL with the newest mtime.
-def claude_log_dir(city_dir: str) -> str:
-    encoded = city_dir.replace("/", "-")
+
+def claude_log_dir(work_dir: str) -> str:
+    """Map a session/rig cwd to its Claude Code project log directory."""
+    encoded = work_dir.replace("/", "-")
     return os.path.expanduser(f"~/.claude/projects/{encoded}")
 
 
-# Actors and event types to skip in the feed (low-signal noise).
+# Actors and event types to skip in the gc-events stream (low signal).
 NOISE_ACTORS = {"cache-reconcile"}
 NOISE_TYPES = {"controller.heartbeat"}
 
-# Prompt: focus on the AGENT's actions, not the conversation. The user
-# isn't doing the work — the agents (mayor, dogs) are. So describe what
-# the agents are doing right now, treating the user's prompts as direction
-# rather than action.
 SUMMARY_PROMPT = (
     "You are summarizing live activity from a multi-agent coding system "
     "(Gas City). Below are recent events: agent tool calls (Bash, Read, "
@@ -75,9 +70,12 @@ SUMMARY_PROMPT = (
     "(start with 'Mayor is …' or '<agent-name> is …'). "
     "Mention specific files, commands, or topics when present. "
     "Be concrete. No filler, no markdown, never say 'the user'.\n\n"
+    "Scope: {scope}\n"
     "Events (oldest to newest):\n{events}\n\nSummary:"
 )
 
+
+# --- event formatting -------------------------------------------------------
 
 def fmt_event(ev: dict) -> str:
     """One-line, rich-markup form of a gc API event."""
@@ -111,7 +109,6 @@ def fmt_event(ev: dict) -> str:
 
 
 def fmt_event_for_prompt(ev: dict) -> str:
-    """Plain-text event line for the LLM prompt (matches gastown style)."""
     ts = ev.get("ts", "")[11:19]
     actor = ev.get("actor", "?")
     typ = ev.get("type", "?")
@@ -141,9 +138,9 @@ def _truncate(s: str, n: int = 80) -> str:
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
+# --- claude log → event dict -----------------------------------------------
+
 def _block_to_event(ts: str, actor: str, c: dict) -> Optional[dict]:
-    """Translate one content block into an event dict. Returns None for blocks
-    we don't care to surface (e.g. unsupported variants)."""
     if not isinstance(c, dict):
         return None
     ct = c.get("type")
@@ -171,13 +168,11 @@ def _block_to_event(ts: str, actor: str, c: dict) -> Optional[dict]:
                     line = f"{k}={_truncate(v, 80)}"
                     break
         return {"ts": ts, "actor": actor, "type": f"tool.{tool}",
-                "subject": "", "message": line}
+                "subject": "", "message": line, "_tool": tool, "_input": inp}
     if ct == "text":
         return {"ts": ts, "actor": actor, "type": "assistant.text",
                 "subject": "", "message": _truncate(c.get("text", ""), 200)}
     if ct == "thinking":
-        # Claude's saved logs redact thinking content (only signature is kept),
-        # so the message is always empty. Skip these — they'd just be noise.
         text = c.get("thinking", "")
         if not text:
             return None
@@ -195,10 +190,7 @@ def _block_to_event(ts: str, actor: str, c: dict) -> Optional[dict]:
     return None
 
 
-def claude_to_events(rec: dict) -> List[dict]:
-    """Translate a Claude Code session-log record into a list of event dicts
-    (one per content block) so the entire conversation flows through our
-    renderer + AI summary buffer."""
+def claude_to_events(rec: dict, default_actor: str = "mayor") -> List[dict]:
     typ = rec.get("type")
     ts = rec.get("timestamp", "")
     msg = rec.get("message") or {}
@@ -229,28 +221,26 @@ def claude_to_events(rec: dict) -> List[dict]:
         content = msg.get("content")
         if not isinstance(content, list):
             return []
-        return [e for c in content for e in [_block_to_event(ts, "mayor", c)] if e]
+        return [e for c in content for e in [_block_to_event(ts, default_actor, c)] if e]
 
     return []
 
 
 def fmt_claude_event(ev: dict) -> str:
-    """Rich-markup line for an event we got from Claude's log."""
     ts = ev.get("ts", "")[11:19]
     actor = ev.get("actor", "?")
     typ = ev.get("type", "?")
     msg = ev.get("message", "")
     color = {
         "mayor": "green",
-        "user": "magenta",
-        "tool": "blue",
+        "user":  "magenta",
+        "tool":  "blue",
     }.get(actor, "white")
-    return (
-        f"[dim]{ts}[/dim] "
-        f"[{color}]{actor:<8}[/{color}] "
-        f"[cyan]{typ:<22}[/cyan] {msg}"
-    )
+    return (f"[dim]{ts}[/dim] [{color}]{actor:<8}[/{color}] "
+            f"[cyan]{typ:<22}[/cyan] {msg}")
 
+
+# --- gc helpers ------------------------------------------------------------
 
 async def run_gc(*args: str, timeout: float = 10.0) -> str:
     proc = await asyncio.create_subprocess_exec(
@@ -267,12 +257,20 @@ async def run_gc(*args: str, timeout: float = 10.0) -> str:
         return ""
 
 
-async def ollama_summarize(events: List[dict]) -> Optional[tuple]:
-    """Returns (text, secs, tokens) or None."""
+async def get_rigs() -> List[Dict]:
+    out = await run_gc("rig", "list", "--json", timeout=10)
+    try:
+        data = json.loads(out)
+    except Exception:
+        return []
+    return data.get("rigs") or []
+
+
+async def ollama_summarize(events: List[dict], scope: str) -> Optional[Tuple[str, float, int]]:
     if not events:
         return None
     lines = [fmt_event_for_prompt(e) for e in events]
-    prompt = SUMMARY_PROMPT.format(events="\n".join(lines))
+    prompt = SUMMARY_PROMPT.format(events="\n".join(lines), scope=scope)
 
     def _call():
         body = json.dumps(
@@ -288,9 +286,7 @@ async def ollama_summarize(events: List[dict]) -> Optional[tuple]:
                 resp = json.loads(r.read().decode())
         except Exception as e:
             return (f"(ollama error: {e})", 0.0, 0)
-        text = (resp.get("response") or "").strip()
-        # Strip leading newlines (gastown bug fix carry-over).
-        text = text.lstrip("\n").strip()
+        text = (resp.get("response") or "").strip().lstrip("\n").strip()
         secs = resp.get("total_duration", 0) / 1e9
         tokens = resp.get("eval_count", 0)
         return (text, secs, tokens)
@@ -298,25 +294,80 @@ async def ollama_summarize(events: List[dict]) -> Optional[tuple]:
     return await asyncio.to_thread(_call)
 
 
+# --- multi-file claude tailer ----------------------------------------------
+
+class FileTailer:
+    """Tracks one .jsonl file: open fp + offset + inode. Yields parsed
+    records on each .read_new() call."""
+    def __init__(self, path: str):
+        self.path = path
+        self.fp = open(path, "r", encoding="utf-8", errors="replace")
+        self.fp.seek(0, os.SEEK_END)
+        end = self.fp.tell()
+        # Backfill last ~32KB so a freshly-attached tailer has context.
+        self.fp.seek(max(0, end - 32768))
+        if end > 32768:
+            self.fp.readline()
+        self.offset = self.fp.tell()
+        try:
+            self.inode = os.fstat(self.fp.fileno()).st_ino
+        except OSError:
+            self.inode = None
+
+    def close(self):
+        try:
+            self.fp.close()
+        except Exception:
+            pass
+
+    def read_new(self) -> List[dict]:
+        records: List[dict] = []
+        try:
+            st = os.stat(self.path)
+            if st.st_ino != self.inode or st.st_size < self.offset:
+                self.fp.close()
+                self.fp = open(self.path, "r", encoding="utf-8", errors="replace")
+                self.offset = 0
+                self.inode = os.fstat(self.fp.fileno()).st_ino
+        except OSError:
+            return records
+
+        self.fp.seek(self.offset)
+        while True:
+            line = self.fp.readline()
+            if not line:
+                break
+            if not line.endswith("\n"):
+                break
+            self.offset = self.fp.tell()
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        return records
+
+
+# --- the app ----------------------------------------------------------------
+
 class GCFeedApp(App):
     CSS = """
     Screen { layout: vertical; }
-
     #header_status { height: 1; padding: 0 1; background: $boost; }
 
     #top { height: 1fr; }
-    #left { width: 36%; }
+    #left  { width: 36%; }
     #right { width: 64%; border-left: solid $accent; }
 
-    DataTable { height: 1fr; }
-    #sessions { height: 50%; }
-    #beads { height: 50%; }
+    #rigs  { height: 50%; }
+    #todos { height: 50%; border-top: solid $accent; padding: 0 1; }
 
-    /* Right column: events fills the available space, summary takes a
-       fixed 12-row bottom strip. No nested wrappers — those collapse
-       to zero height when the parent Vertical can't compute children. */
     #events  { height: 1fr; }
     #summary { height: 12; border-top: solid $warning; }
+
+    DataTable { height: 1fr; }
 
     .focused { border: heavy $success; }
     """
@@ -328,10 +379,11 @@ class GCFeedApp(App):
         Binding("a", "force_summary", "Now"),
         Binding("r", "refresh", "Refresh"),
         Binding("tab", "cycle_focus", "Focus →"),
-        Binding("up", "scroll_up", show=False),
-        Binding("down", "scroll_down", show=False),
-        Binding("j", "scroll_down", show=False),
-        Binding("k", "scroll_up", show=False),
+        Binding("enter", "select_rig", "Pick rig"),
+        Binding("up", "scroll_or_move(-1)", show=False),
+        Binding("down", "scroll_or_move(1)", show=False),
+        Binding("j", "scroll_or_move(1)", show=False),
+        Binding("k", "scroll_or_move(-1)", show=False),
         Binding("pageup", "page_up", show=False),
         Binding("pagedown", "page_down", show=False),
         Binding("home", "scroll_home", show=False),
@@ -347,90 +399,212 @@ class GCFeedApp(App):
         self.last_summary_at = time.time()
         self.summarizing = False
         self._tail_proc: Optional[asyncio.subprocess.Process] = None
-        self._current_claude_log: Optional[str] = None
-        self.focused_panel = "events"  # or "summary"
-        # Strong refs so create_task'd coroutines don't get GC'd mid-run
-        # (which silently kills them in CPython 3.9+).
+        self.focused_panel = "rigs"  # rigs | events | summary
         self._bg_tasks: list = []
         self.claude_seen = 0
+
+        # Rig model. None == "(all rigs)" (merge HQ + every rig).
+        self.rigs: List[Dict] = []
+        self.current_rig_path: Optional[str] = None
+        self.current_rig_label: str = "(all rigs)"
+
+        # Active claude tailers, keyed by file path.
+        self._tailers: Dict[str, FileTailer] = {}
+
+        # Mayor todos (parsed from TodoWrite tool calls).
+        self.todos: List[Dict] = []
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield Static(id="header_status")
         with Horizontal(id="top"):
             with Vertical(id="left"):
-                yield DataTable(id="sessions", zebra_stripes=True)
-                yield DataTable(id="beads", zebra_stripes=True)
+                yield DataTable(id="rigs", zebra_stripes=True)
+                yield Static(id="todos", markup=True)
             with Vertical(id="right"):
-                yield RichLog(
-                    id="events", highlight=False, markup=True,
-                    wrap=False, max_lines=2000,
-                )
-                yield RichLog(
-                    id="summary", highlight=False, markup=True,
-                    wrap=True, max_lines=400,
-                )
+                yield RichLog(id="events", highlight=False, markup=True,
+                              wrap=False, max_lines=2000)
+                yield RichLog(id="summary", highlight=False, markup=True,
+                              wrap=True, max_lines=400)
         yield Footer()
 
     async def on_mount(self) -> None:
         self.title = f"gc feed — {os.path.basename(CITY_DIR)}"
         self.sub_title = CITY_DIR
 
-        sess = self.query_one("#sessions", DataTable)
-        sess.add_columns("session", "state", "last")
-        sess.cursor_type = "row"
+        rigs_t = self.query_one("#rigs", DataTable)
+        rigs_t.add_columns("rig", "path")
+        rigs_t.cursor_type = "row"
+        rigs_t.add_row("(all rigs)", "merged stream")
 
-        beads = self.query_one("#beads", DataTable)
-        beads.add_columns("id", "type", "status", "title")
-        beads.cursor_type = "row"
+        todos_w = self.query_one("#todos", Static)
+        todos_w.update("[dim]Mayor's TodoWrite list will appear here as it changes.[/dim]")
 
-        summary = self.query_one("#summary", RichLog)
-        if DISABLED:
-            summary.write("[dim]AI summary disabled (GC_FEED_AI_DISABLE=1)[/dim]")
-        else:
-            summary.write(
-                f"[dim]AI summary on. Model={MODEL}, every={EVERY} events / "
-                f"{INTERVAL}s. Press 's' to hide, 'a' to summarize now, "
-                f"tab to focus this panel, j/k to scroll.[/dim]"
-            )
+        summary_w = self.query_one("#summary", RichLog)
+        summary_w.write(
+            f"[dim]AI summary on. Model={MODEL}, every={EVERY} events / "
+            f"{INTERVAL}s. Press 's' to hide, 'a' to summarize now, "
+            f"tab to cycle focus, j/k to scroll.[/dim]"
+        ) if not DISABLED else summary_w.write(
+            "[dim]AI summary disabled (GC_FEED_AI_DISABLE=1)[/dim]")
 
         self._set_summary_visible(self.show_summary)
         self._update_focus_styles()
 
+        await self._refresh_rigs()
         await self._refresh_state()
-        await self._load_history()
+        # Default scope = all rigs.
+        await self._switch_rig(None, "(all rigs)", flush=False)
+
         self.set_interval(8.0, lambda: self._spawn(self._refresh_state()))
+        self.set_interval(15.0, lambda: self._spawn(self._refresh_rigs()))
+        self.set_interval(0.5,  lambda: self._spawn(self._poll_tailers()))
         if not DISABLED:
             self.set_interval(2.0, self._maybe_summarize_sync)
         self._spawn(self._tail_events())
-        self._spawn(self._tail_claude_log_safe())
 
-    # --- panels ---------------------------------------------------------
+    # --- tasking --------------------------------------------------------
 
-    def _set_summary_visible(self, on: bool) -> None:
+    def _spawn(self, coro):
+        task = asyncio.create_task(coro)
+        self._bg_tasks.append(task)
+        def _done(t: asyncio.Task) -> None:
+            try: self._bg_tasks.remove(t)
+            except ValueError: pass
+            if t.cancelled(): return
+            exc = t.exception()
+            if exc is not None:
+                try:
+                    log = self.query_one("#events", RichLog)
+                    log.write(f"[red]task error: {type(exc).__name__}: {exc}[/red]")
+                except Exception:
+                    pass
+        task.add_done_callback(_done)
+        return task
+
+    # --- rigs panel & rig selection ------------------------------------
+
+    async def _refresh_rigs(self) -> None:
         try:
-            panel = self.query_one("#summary", RichLog)
-            panel.styles.display = "block" if on else "none"
-        except Exception:
-            pass
+            rigs = await get_rigs()
+        except Exception as e:
+            self._note_err(f"rig list failed: {e}")
+            return
+        # Preserve current cursor if possible.
+        rigs_t = self.query_one("#rigs", DataTable)
+        prev_cursor = rigs_t.cursor_row
+        rigs_t.clear(columns=False)
+        rigs_t.add_row("(all rigs)", "merged stream")
+        for r in rigs:
+            label = r.get("name", "?")
+            if r.get("hq"):
+                label = f"{label} (HQ)"
+            rigs_t.add_row(label, r.get("path", ""))
+        self.rigs = rigs
+        # Keep cursor in range.
+        if prev_cursor is not None and prev_cursor < rigs_t.row_count:
+            rigs_t.move_cursor(row=prev_cursor)
 
-    def watch_show_summary(self, on: bool) -> None:
-        self._set_summary_visible(on)
+    def _highlighted_rig(self) -> Tuple[Optional[str], str]:
+        """Return (path, label) for currently highlighted row in rigs table.
+        path == None means '(all rigs)'."""
+        rigs_t = self.query_one("#rigs", DataTable)
+        idx = rigs_t.cursor_row or 0
+        if idx <= 0 or idx > len(self.rigs):
+            return None, "(all rigs)"
+        r = self.rigs[idx - 1]
+        label = r.get("name", "?")
+        if r.get("hq"):
+            label = f"{label} (HQ)"
+        return r.get("path"), label
 
-    def _focused_widget(self):
-        wid = "events" if self.focused_panel == "events" else "summary"
-        return self.query_one(f"#{wid}", RichLog)
+    async def _switch_rig(self, path: Optional[str], label: str, flush: bool = True) -> None:
+        """Re-target right-side panels to scope (path == None means all)."""
+        self.current_rig_path = path
+        self.current_rig_label = label
 
-    def _update_focus_styles(self) -> None:
-        for name in ("events", "summary"):
+        if flush:
+            self.event_buf.clear()
+            self.events_since_summary = 0
             try:
-                w = self.query_one(f"#{name}", RichLog)
-                if name == self.focused_panel:
-                    w.add_class("focused")
-                else:
-                    w.remove_class("focused")
+                self.query_one("#events", RichLog).clear()
+                self.query_one("#summary", RichLog).clear()
             except Exception:
                 pass
+
+        # Decide which dirs to watch.
+        dirs_to_watch: List[str] = []
+        if path is None:
+            # All: HQ + every rig path.
+            seen = set()
+            seen.add(CITY_DIR)
+            dirs_to_watch.append(claude_log_dir(CITY_DIR))
+            for r in self.rigs:
+                p = r.get("path")
+                if p and p not in seen:
+                    seen.add(p)
+                    dirs_to_watch.append(claude_log_dir(p))
+        else:
+            dirs_to_watch.append(claude_log_dir(path))
+
+        # Close existing tailers and rebuild for the new scope.
+        for t in self._tailers.values():
+            t.close()
+        self._tailers = {}
+        self._dirs_to_watch = dirs_to_watch
+        log = self.query_one("#events", RichLog)
+        log.write(f"[dim]── scope: {label} — watching {len(dirs_to_watch)} log dir(s) ──[/dim]")
+
+    async def _poll_tailers(self) -> None:
+        """Discover new .jsonl files in watched dirs and read any new lines."""
+        log = self.query_one("#events", RichLog)
+        # Discover new files.
+        for d in getattr(self, "_dirs_to_watch", []):
+            if not os.path.isdir(d):
+                continue
+            for name in os.listdir(d):
+                if not name.endswith(".jsonl"):
+                    continue
+                p = os.path.join(d, name)
+                if p in self._tailers:
+                    continue
+                try:
+                    self._tailers[p] = FileTailer(p)
+                    log.write(f"[dim]── tailing {os.path.basename(d)}/{name} ──[/dim]")
+                except OSError as e:
+                    self._note_err(f"open {p}: {e}")
+        # Read new records from each tailer.
+        for path, tailer in list(self._tailers.items()):
+            try:
+                records = tailer.read_new()
+            except OSError as e:
+                self._note_err(f"read {path}: {e}")
+                continue
+            for rec in records:
+                self.claude_seen += 1
+                self._maybe_update_todos(rec)
+                # Choose actor name: dir-encoded path is the cwd. For HQ that's
+                # mayor; for other rigs default to that rig's name.
+                actor = self._actor_for_path(path)
+                for ev in claude_to_events(rec, default_actor=actor):
+                    log.write(fmt_claude_event(ev))
+                    self.event_buf.append(ev)
+                    self.events_since_summary += 1
+
+    def _actor_for_path(self, log_file_path: str) -> str:
+        """Best-effort: derive a short actor name from the log file's parent
+        directory (the encoded cwd). HQ → 'mayor'; otherwise, last segment
+        of the cwd."""
+        d = os.path.basename(os.path.dirname(log_file_path))  # encoded cwd
+        # decode: -Users-homer-gc → /Users/homer/gc
+        cwd = d.replace("-", "/")
+        if cwd == CITY_DIR or cwd.endswith("/gc"):
+            return "mayor"
+        # Pick rig name if known.
+        for r in self.rigs:
+            if r.get("path") == cwd:
+                return r.get("name", "agent")
+        return os.path.basename(cwd) or "agent"
 
     # --- actions --------------------------------------------------------
 
@@ -441,38 +615,114 @@ class GCFeedApp(App):
             self._update_focus_styles()
 
     def action_refresh(self) -> None:
-        asyncio.create_task(self._refresh_state())
+        self._spawn(self._refresh_state())
+        self._spawn(self._refresh_rigs())
 
     def action_force_summary(self) -> None:
         if not DISABLED and not self.summarizing:
-            asyncio.create_task(self._do_summarize())
+            self._spawn(self._do_summarize())
 
     def action_cycle_focus(self) -> None:
-        if self.focused_panel == "events" and self.show_summary:
-            self.focused_panel = "summary"
-        else:
-            self.focused_panel = "events"
+        order = ["rigs", "events"]
+        if self.show_summary:
+            order.append("summary")
+        try:
+            i = order.index(self.focused_panel)
+        except ValueError:
+            i = 0
+        self.focused_panel = order[(i + 1) % len(order)]
         self._update_focus_styles()
 
-    def action_scroll_up(self) -> None:
-        self._focused_widget().scroll_up()
+    def action_select_rig(self) -> None:
+        if self.focused_panel != "rigs":
+            return
+        path, label = self._highlighted_rig()
+        self._spawn(self._switch_rig(path, label, flush=True))
 
-    def action_scroll_down(self) -> None:
-        self._focused_widget().scroll_down()
+    def action_scroll_or_move(self, direction: int) -> None:
+        if self.focused_panel == "rigs":
+            t = self.query_one("#rigs", DataTable)
+            if direction < 0:
+                t.action_cursor_up()
+            else:
+                t.action_cursor_down()
+        else:
+            w = self._focused_log()
+            if direction < 0: w.scroll_up()
+            else: w.scroll_down()
 
     def action_page_up(self) -> None:
-        self._focused_widget().scroll_page_up()
+        if self.focused_panel != "rigs":
+            self._focused_log().scroll_page_up()
 
     def action_page_down(self) -> None:
-        self._focused_widget().scroll_page_down()
+        if self.focused_panel != "rigs":
+            self._focused_log().scroll_page_down()
 
     def action_scroll_home(self) -> None:
-        self._focused_widget().scroll_home()
+        if self.focused_panel != "rigs":
+            self._focused_log().scroll_home()
 
     def action_scroll_end(self) -> None:
-        self._focused_widget().scroll_end()
+        if self.focused_panel != "rigs":
+            self._focused_log().scroll_end()
 
-    # --- background workers --------------------------------------------
+    # --- focus / layout helpers ----------------------------------------
+
+    def _focused_log(self) -> RichLog:
+        wid = "events" if self.focused_panel != "summary" else "summary"
+        return self.query_one(f"#{wid}", RichLog)
+
+    def _update_focus_styles(self) -> None:
+        for name, cls in (("rigs", DataTable), ("events", RichLog), ("summary", RichLog)):
+            try:
+                w = self.query_one(f"#{name}", cls)
+                if name == self.focused_panel:
+                    w.add_class("focused")
+                else:
+                    w.remove_class("focused")
+            except Exception:
+                pass
+
+    def _set_summary_visible(self, on: bool) -> None:
+        try:
+            self.query_one("#summary", RichLog).styles.display = "block" if on else "none"
+        except Exception:
+            pass
+
+    def watch_show_summary(self, on: bool) -> None:
+        self._set_summary_visible(on)
+
+    def _note_err(self, msg: str) -> None:
+        try:
+            self.query_one("#events", RichLog).write(f"[red]{msg}[/red]")
+        except Exception:
+            pass
+
+    # --- supervisor refresh / header ----------------------------------
+
+    async def _refresh_state(self) -> None:
+        try:
+            status_out = await run_gc("supervisor", "status")
+        except FileNotFoundError:
+            return
+        self._update_header(status_out)
+
+    def _update_header(self, supervisor_status: str) -> None:
+        head = self.query_one("#header_status", Static)
+        sup_line = (supervisor_status.strip().split("\n", 1)[0]
+                    if supervisor_status else "supervisor: ?")
+        ai = "off" if DISABLED else f"on • {MODEL} • every {EVERY}/{INTERVAL}s"
+        head.update(
+            f"[b cyan]{os.path.basename(CITY_DIR)}[/b cyan]  "
+            f"[dim]scope: {self.current_rig_label}[/dim]  │  "
+            f"[yellow]{sup_line}[/yellow]  │  "
+            f"buf=[b]{len(self.event_buf)}[/b]  pending=[b]{self.events_since_summary}[/b]  "
+            f"claude=[b]{self.claude_seen}[/b]  │  "
+            f"AI: [magenta]{ai}[/magenta]"
+        )
+
+    # --- summary ------------------------------------------------------
 
     def _maybe_summarize_sync(self) -> None:
         if self.summarizing:
@@ -481,81 +731,43 @@ class GCFeedApp(App):
             self.events_since_summary > 0
             and time.time() - self.last_summary_at >= INTERVAL
         ):
-            asyncio.create_task(self._do_summarize())
+            self._spawn(self._do_summarize())
 
-    async def _refresh_state(self) -> None:
+    def _summary_wrap_width(self) -> int:
         try:
-            sess_out = await run_gc("session", "list")
-            beads_out = await run_gc("bd", "ready")
-            status_out = await run_gc("supervisor", "status")
-        except FileNotFoundError:
+            w = self.query_one("#summary", RichLog).size.width
+            if w and w > 10:
+                return max(20, w - 2)
+        except Exception:
+            pass
+        return max(40, shutil.get_terminal_size((80, 24)).columns - 50)
+
+    async def _do_summarize(self) -> None:
+        if self.summarizing or not self.event_buf:
             return
+        self.summarizing = True
+        snapshot = list(self.event_buf)
+        self.events_since_summary = 0
+        self.last_summary_at = time.time()
+        summary_w = self.query_one("#summary", RichLog)
+        summary_w.write("[dim]summarizing…[/dim]")
+        result = await ollama_summarize(snapshot, scope=self.current_rig_label)
+        if result:
+            text, secs, tokens = result
+            ts = time.strftime("%H:%M:%S")
+            summary_w.write(
+                f"[b yellow]{ts}[/b yellow] [dim]({secs:.1f}s, {tokens}t, "
+                f"n={len(snapshot)}, scope={self.current_rig_label})[/dim]"
+            )
+            width = self._summary_wrap_width()
+            for line in (text or "(no response)").splitlines() or [""]:
+                wrapped = textwrap.wrap(line, width=width) or [""]
+                for w in wrapped:
+                    summary_w.write(w)
+            summary_w.write("")
+        self.summarizing = False
 
-        self._update_header(status_out)
-        self._update_sessions(sess_out)
-        self._update_beads(beads_out)
-
-    def _update_header(self, supervisor_status: str) -> None:
-        head = self.query_one("#header_status", Static)
-        sup_line = (supervisor_status.strip().split("\n", 1)[0]
-                    if supervisor_status else "supervisor: ?")
-        ai = "off" if DISABLED else (
-            f"on • {MODEL} • every {EVERY}/{INTERVAL}s")
-        claude_seen = getattr(self, "claude_seen", 0)
-        head.update(
-            f"[b cyan]{os.path.basename(CITY_DIR)}[/b cyan]  "
-            f"[dim]{CITY_DIR}[/dim]  │  [yellow]{sup_line}[/yellow]  │  "
-            f"buf=[b]{len(self.event_buf)}[/b]  pending=[b]{self.events_since_summary}[/b]  "
-            f"claude=[b]{claude_seen}[/b]  │  "
-            f"AI: [magenta]{ai}[/magenta]"
-        )
-
-    def _update_sessions(self, gc_session_list_output: str) -> None:
-        sess = self.query_one("#sessions", DataTable)
-        sess.clear()
-        for line in gc_session_list_output.splitlines()[1:]:
-            parts = line.split()
-            if len(parts) < 3:
-                continue
-            sid, tmpl, state = parts[0], parts[1], parts[2]
-            last = " ".join(parts[-2:]) if len(parts) >= 5 else ""
-            sess.add_row(f"{tmpl} ({sid})", state, last)
-
-    def _update_beads(self, gc_bd_ready_output: str) -> None:
-        beads = self.query_one("#beads", DataTable)
-        beads.clear()
-        for line in gc_bd_ready_output.splitlines():
-            line = line.rstrip()
-            if not line:
-                continue
-            stripped = line.lstrip(" o●*")
-            parts = stripped.split(maxsplit=2)
-            if not parts:
-                continue
-            bid = parts[0]
-            rest = parts[1] if len(parts) > 1 else ""
-            title = parts[2] if len(parts) > 2 else ""
-            beads.add_row(bid, "", rest, title[:60])
-
-    async def _load_history(self) -> None:
-        out = await run_gc("events", "--since", HISTORY_SINCE, timeout=15)
-        log = self.query_one("#events", RichLog)
-        added = 0
-        for line in out.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                ev = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if is_noise(ev):
-                continue
-            log.write(fmt_event(ev))
-            self.event_buf.append(ev)
-            self.events_since_summary += 1
-            added += 1
-        log.write(f"[dim]── {added} historical events; live follows ──[/dim]")
+    # --- gc events tail ------------------------------------------------
 
     async def _tail_events(self) -> None:
         self._tail_proc = await asyncio.create_subprocess_exec(
@@ -581,192 +793,53 @@ class GCFeedApp(App):
             self.event_buf.append(ev)
             self.events_since_summary += 1
 
-    def _newest_claude_log(self) -> Optional[str]:
-        d = claude_log_dir(CITY_DIR)
-        if not os.path.isdir(d):
-            return None
-        candidates = []
-        for name in os.listdir(d):
-            if name.endswith(".jsonl"):
-                p = os.path.join(d, name)
-                try:
-                    candidates.append((os.path.getmtime(p), p))
-                except OSError:
-                    pass
-        if not candidates:
-            return None
-        candidates.sort(reverse=True)
-        return candidates[0][1]
+    # --- todos panel ---------------------------------------------------
 
-    def _spawn(self, coro):
-        """Wrapper around create_task that keeps a strong reference and surfaces
-        exceptions to the events log instead of swallowing them silently."""
-        task = asyncio.create_task(coro)
-        self._bg_tasks.append(task)
-        def _done(t: asyncio.Task) -> None:
-            try:
-                self._bg_tasks.remove(t)
-            except ValueError:
-                pass
-            if t.cancelled():
-                return
-            exc = t.exception()
-            if exc is not None:
-                try:
-                    log = self.query_one("#events", RichLog)
-                    log.write(f"[red]task error: {type(exc).__name__}: {exc}[/red]")
-                except Exception:
-                    pass
-        task.add_done_callback(_done)
-        return task
-
-    async def _tail_claude_log_safe(self) -> None:
-        """Restart the tailer if it errors out. Emit a visible line per restart
-        so a silent failure can never happen again."""
-        attempts = 0
-        while True:
-            try:
-                attempts += 1
-                if attempts > 1:
-                    try:
-                        log = self.query_one("#events", RichLog)
-                        log.write(f"[dim]── restarting claude tailer (attempt {attempts}) ──[/dim]")
-                    except Exception:
-                        pass
-                await self._tail_claude_log()
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                try:
-                    log = self.query_one("#events", RichLog)
-                    log.write(f"[red]claude tailer crashed: {type(exc).__name__}: {exc}[/red]")
-                except Exception:
-                    pass
-                await asyncio.sleep(2)
-
-    async def _tail_claude_log(self) -> None:
-        """Native Python tail -F replacement. Avoids the line-buffering issues
-        macOS BSD `tail -F` has when piped into another process. Polls for new
-        bytes every 250ms; handles file rotation (different inode → re-open)."""
-        log = self.query_one("#events", RichLog)
-        path = None
-        fp = None
-        inode = None
-        offset = 0
-        announced_path = None
-
-        try:
-            while True:
-                # Re-discover newest file on each iteration so a session
-                # restart (new sessionId.jsonl) gets picked up promptly.
-                latest = self._newest_claude_log()
-                if not latest:
-                    if announced_path is None:
-                        log.write(f"[dim]── no claude log at {claude_log_dir(CITY_DIR)} yet (waiting) ──[/dim]")
-                        announced_path = "<none>"
-                    await asyncio.sleep(2)
-                    continue
-
-                if latest != path:
-                    # Switch target.
-                    if fp is not None:
-                        fp.close()
-                    path = latest
-                    fp = open(path, "r", encoding="utf-8", errors="replace")
-                    # On first attach, jump near end (last ~64KB) to backfill
-                    # recent context without flooding with the whole history.
-                    fp.seek(0, os.SEEK_END)
-                    end = fp.tell()
-                    fp.seek(max(0, end - 65536))
-                    if end > 65536:
-                        fp.readline()  # skip partial first line
-                    offset = fp.tell()
-                    inode = os.fstat(fp.fileno()).st_ino
-                    self._current_claude_log = path
-                    log.write(f"[dim]── tailing claude log: {os.path.basename(path)} ──[/dim]")
-                    announced_path = path
-
-                # Detect file rotation (truncate or replace).
-                try:
-                    st = os.stat(path)
-                    if st.st_ino != inode or st.st_size < offset:
-                        fp.close()
-                        fp = open(path, "r", encoding="utf-8", errors="replace")
-                        offset = 0
-                        inode = os.fstat(fp.fileno()).st_ino
-                except OSError:
-                    await asyncio.sleep(1)
-                    continue
-
-                # Read and parse any new lines.
-                # NOTE: must use `readline()` not `for line in fp:` — text-mode
-                # iteration uses readahead buffering that disables `tell()`,
-                # which is exactly the offset we need to track.
-                fp.seek(offset)
-                while True:
-                    line = fp.readline()
-                    if not line:
-                        break  # EOF (no more data right now)
-                    if not line.endswith("\n"):
-                        # incomplete tail; don't advance offset, retry next tick
-                        break
-                    offset = fp.tell()
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        rec = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    self.claude_seen += 1
-                    for ev in claude_to_events(rec):
-                        log.write(fmt_claude_event(ev))
-                        self.event_buf.append(ev)
-                        self.events_since_summary += 1
-
-                await asyncio.sleep(0.25)
-        finally:
-            if fp is not None:
-                fp.close()
-
-
-    def _summary_wrap_width(self) -> int:
-        """Best estimate of how wide the summary widget can render. Keeps
-        manual wrapping conservative if the widget hasn't laid out yet."""
-        try:
-            w = self.query_one("#summary", RichLog).size.width
-            if w and w > 10:
-                return max(20, w - 2)
-        except Exception:
-            pass
-        return max(40, shutil.get_terminal_size((80, 24)).columns - 50)
-
-    async def _do_summarize(self) -> None:
-        if self.summarizing or not self.event_buf:
+    def _maybe_update_todos(self, claude_record: dict) -> None:
+        """Watch for the most recent TodoWrite tool call and re-render the
+        todos panel from its input.todos."""
+        if claude_record.get("type") != "assistant":
             return
-        self.summarizing = True
-        snapshot = list(self.event_buf)
-        self.events_since_summary = 0
-        self.last_summary_at = time.time()
-        summary_w = self.query_one("#summary", RichLog)
-        summary_w.write("[dim]summarizing…[/dim]")
-        result = await ollama_summarize(snapshot)
-        if result:
-            text, secs, tokens = result
-            ts = time.strftime("%H:%M:%S")
-            summary_w.write(
-                f"[b yellow]{ts}[/b yellow] [dim]({secs:.1f}s, {tokens}t, n={len(snapshot)})[/dim]"
-            )
-            # Hard-wrap the body so long sentences can't run off the right
-            # edge of the panel — RichLog's internal wrap=True still
-            # sometimes overflows in narrow iTerm splits.
-            width = self._summary_wrap_width()
-            for line in (text or "(no response)").splitlines() or [""]:
-                wrapped = textwrap.wrap(line, width=width) or [""]
-                for w in wrapped:
-                    summary_w.write(w)
-            summary_w.write("")  # spacer
-        self.summarizing = False
+        content = (claude_record.get("message") or {}).get("content") or []
+        if not isinstance(content, list):
+            return
+        latest_todos = None
+        for c in content:
+            if isinstance(c, dict) and c.get("type") == "tool_use" and c.get("name") == "TodoWrite":
+                latest_todos = (c.get("input") or {}).get("todos") or []
+        if latest_todos is None:
+            return
+        self.todos = latest_todos
+        self._render_todos()
+
+    def _render_todos(self) -> None:
+        try:
+            w = self.query_one("#todos", Static)
+        except Exception:
+            return
+        if not self.todos:
+            w.update("[dim]no TodoWrite seen yet[/dim]")
+            return
+        lines = ["[b]Mayor's todos[/b]"]
+        for t in self.todos[:14]:
+            status = (t.get("status") or "pending")
+            content = t.get("content") or ""
+            icon = {
+                "pending":     "[dim]☐[/dim]",
+                "in_progress": "[yellow]◐[/yellow]",
+                "completed":   "[green]☑[/green]",
+            }.get(status, "?")
+            color = {
+                "pending":     "white",
+                "in_progress": "b yellow",
+                "completed":   "dim strike",
+            }.get(status, "white")
+            lines.append(f"{icon} [{color}]{_truncate(content, 70)}[/{color}]")
+        if len(self.todos) > 14:
+            lines.append(f"[dim]… {len(self.todos) - 14} more[/dim]")
+        w.update("\n".join(lines))
+
+    # --- teardown -----------------------------------------------------
 
     async def on_unmount(self) -> None:
         if self._tail_proc and self._tail_proc.returncode is None:
@@ -775,6 +848,8 @@ class GCFeedApp(App):
                 await asyncio.wait_for(self._tail_proc.wait(), timeout=2)
             except asyncio.TimeoutError:
                 self._tail_proc.kill()
+        for t in self._tailers.values():
+            t.close()
 
 
 if __name__ == "__main__":
