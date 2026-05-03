@@ -21,7 +21,8 @@ containerized/
 ├── shim/                  ← host-side wrapper invoked by the supervisor
 │   ├── gc-docker-runner   ← bash; converts `claude …` → `docker run …`
 │   └── config.example.toml
-├── install.sh             ← build image, install shim, set up symlinks, write config
+├── install.sh             ← one-shot: docker check, build, shim, symlink, PATH, verify
+├── uninstall.sh           ← reverse install.sh
 └── verify.sh              ← runs the seven isolation probes from the spec §8
 ```
 
@@ -57,27 +58,39 @@ Spec reference: [§2 design overview](../docs/containerizing-gascity-for-local-u
 
 ## Quick start
 
+You only need Docker installed. If Docker isn't running, `install.sh`
+will start Docker Desktop on macOS and wait for it.
+
 ```bash
-# 1. From this directory:
 ./install.sh
+```
 
-# 2. Add the shim dir to PATH (install.sh tells you the line to paste).
-#    The shim must come BEFORE the real claude on PATH.
-export PATH="$HOME/.local/bin/gascity-shims:$PATH"
+That single command:
 
-# 3. Verify isolation works.
-./verify.sh
-# → 7 probes pass (smoke, footgun, network, credentials, escape,
-#   concurrency, restart).
+1. Makes sure Docker is up (auto-launches Docker Desktop on macOS).
+2. Builds `gascity-agent-runner:claude` from `agent-runner/`.
+3. Installs the shim at `~/.local/bin/gascity-shims/gc-docker-runner`.
+4. Drops a default config at `~/.config/gascity-docker-runner/config.toml`
+   (preserves any existing config).
+5. Symlinks `claude` → `gc-docker-runner` in the same directory.
+6. Adds `~/.local/bin/gascity-shims` to your shell rc's PATH (idempotent,
+   marker-fenced).
+7. Runs `verify.sh` — the seven isolation probes from spec §8.
 
-# 4. Use Gas City normally on your host. The shim sits transparently in
-#    the middle.
+When it finishes: open a new terminal (or `source ~/.zshrc`) and use Gas
+City normally. Agents the supervisor spawns will run in scoped containers
+automatically.
+
+```bash
 gc init ~/my-city
 cd ~/my-city
 gc rig add ~/code/some-repo
 bd create "do a thing"
 gc start
 ```
+
+To remove everything: `./uninstall.sh`. The image, your config, and
+session logs are preserved (instructions to delete them are printed).
 
 When `gc-supervisor` execs `claude`, your shell's PATH lookup hits
 `~/.local/bin/gascity-shims/claude` first, which is a symlink to
@@ -191,13 +204,15 @@ keeps things simple and global.
 ## Uninstall
 
 ```bash
-./install.sh --uninstall
+./uninstall.sh
 ```
 
-Removes the shim binary and any symlinks. Leaves the agent image (delete
-with `docker rmi gascity-agent-runner:claude`) and the config file (under
-`~/.config/gascity-docker-runner/`) so you can re-install without losing
-tweaks.
+Removes the shim binary, the symlinks, and the PATH lines from your
+shell rc. Leaves the agent image, your config under
+`~/.config/gascity-docker-runner/`, and session logs under
+`~/.local/state/gascity-docker-runner/` so re-install doesn't lose
+tweaks. The script prints the exact commands to delete those if you
+want a full wipe.
 
 ---
 

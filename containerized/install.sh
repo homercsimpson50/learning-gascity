@@ -1,131 +1,185 @@
 #!/usr/bin/env bash
-# install.sh — set up Option A on this host.
+# install.sh — one-shot setup for Option A.
 #
-# Three steps, each independently re-runnable:
-#   1. Build the agent-runner image (gascity-agent-runner:claude).
-#   2. Install the shim binary at ${SHIM_BIN_DIR}/gc-docker-runner.
-#   3. Drop a config file at ~/.config/gascity-docker-runner/config.toml.
-#   4. Symlink ${SHIM_BIN_DIR}/claude → gc-docker-runner so PATH lookups
-#      from gc-supervisor route through the shim.
+# After this runs successfully, you can use gascity normally and every
+# agent invocation will be wrapped in a scoped Docker container.
 #
-# Usage:
-#   ./install.sh                  # full install
-#   ./install.sh --no-build       # skip docker build (re-use existing image)
-#   ./install.sh --no-symlink     # skip the claude symlink (manual wiring)
-#   ./install.sh --uninstall      # remove shim + symlinks (image untouched)
+# What this does, in order:
+#   1. Make sure Docker is running (open Docker Desktop on macOS if needed).
+#   2. Build the agent-runner image (gascity-agent-runner:claude).
+#   3. Install the shim binary at ~/.local/bin/gascity-shims/.
+#   4. Drop a default config at ~/.config/gascity-docker-runner/config.toml.
+#   5. Symlink claude → gc-docker-runner so the supervisor's PATH lookup
+#      hits the shim before the real binary.
+#   6. Add the shim dir to your shell rc's PATH (idempotent).
+#   7. Run verify.sh to confirm all 7 isolation probes pass.
+#
+# Re-running is safe — every step is idempotent.
+#
+# Flags (rarely needed):
+#   ./install.sh --no-build     # skip docker build
+#   ./install.sh --no-verify    # skip verify.sh at the end
 
 set -euo pipefail
-
 cd "$(dirname "$0")"
 
-SHIM_BIN_DIR="${SHIM_BIN_DIR:-$HOME/.local/bin/gascity-shims}"
-CONFIG_DIR="${CONFIG_DIR:-$HOME/.config/gascity-docker-runner}"
-LOG_DIR="${LOG_DIR:-$HOME/.local/state/gascity-docker-runner/logs}"
+SHIM_BIN_DIR="$HOME/.local/bin/gascity-shims"
+CONFIG_DIR="$HOME/.config/gascity-docker-runner"
+LOG_DIR="$HOME/.local/state/gascity-docker-runner/logs"
 
 DO_BUILD=1
-DO_SYMLINK=1
-ACTION=install
-
+DO_VERIFY=1
 for arg in "$@"; do
     case "$arg" in
-        --no-build)   DO_BUILD=0 ;;
-        --no-symlink) DO_SYMLINK=0 ;;
-        --uninstall)  ACTION=uninstall ;;
+        --no-build)  DO_BUILD=0 ;;
+        --no-verify) DO_VERIFY=0 ;;
         -h|--help)
-            sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
             exit 0 ;;
-        *) echo "unknown option: $arg" >&2; exit 2 ;;
+        *) echo "unknown option: $arg (try --help)" >&2; exit 2 ;;
     esac
 done
 
-# ---------------------------------------------------------------------------
-# Uninstall
-# ---------------------------------------------------------------------------
-if [ "$ACTION" = uninstall ]; then
-    echo "→ removing shim and symlinks (image and logs preserved)"
-    rm -f "$SHIM_BIN_DIR/gc-docker-runner" \
-          "$SHIM_BIN_DIR/claude" \
-          "$SHIM_BIN_DIR/codex" \
-          "$SHIM_BIN_DIR/gemini"
-    rmdir "$SHIM_BIN_DIR" 2>/dev/null || true
-    echo "  note: config left at $CONFIG_DIR (delete by hand if desired)"
-    echo "  note: agent-runner image left in place (docker rmi gascity-agent-runner:claude to remove)"
-    exit 0
-fi
+say() { printf '\e[1;36m→\e[0m %s\n' "$*"; }
+ok()  { printf '\e[1;32m✓\e[0m %s\n' "$*"; }
+warn() { printf '\e[1;33m⚠\e[0m %s\n' "$*"; }
 
 # ---------------------------------------------------------------------------
-# 1. Build agent image
+# 1. Ensure Docker is up
 # ---------------------------------------------------------------------------
-if [ "$DO_BUILD" -eq 1 ]; then
-    echo "→ building gascity-agent-runner:claude"
-    docker build -t gascity-agent-runner:claude agent-runner/
-else
-    echo "→ skipping docker build (--no-build)"
-    if ! docker image inspect gascity-agent-runner:claude >/dev/null 2>&1; then
-        echo "  ⚠ image gascity-agent-runner:claude not present — re-run without --no-build"
+ensure_docker() {
+    if docker info >/dev/null 2>&1; then
+        ok "Docker is running"
+        return 0
+    fi
+
+    say "Docker isn't running — starting Docker Desktop"
+    if [ "$(uname)" = Darwin ] && [ -d /Applications/Docker.app ]; then
+        open -a Docker
+    else
+        warn "auto-start not supported on this OS — please start the Docker daemon"
         exit 1
     fi
+
+    printf '  waiting for Docker to come up'
+    for _ in $(seq 1 60); do
+        if docker info >/dev/null 2>&1; then
+            echo " ✓"
+            return 0
+        fi
+        printf '.'
+        sleep 2
+    done
+    echo
+    warn "Docker still not responding after 2 minutes — try again once Docker Desktop is ready"
+    exit 1
+}
+ensure_docker
+
+# ---------------------------------------------------------------------------
+# 2. Build the agent image
+# ---------------------------------------------------------------------------
+if [ "$DO_BUILD" -eq 1 ]; then
+    say "Building gascity-agent-runner:claude (first build takes ~3 min)"
+    docker build -t gascity-agent-runner:claude agent-runner/ >/dev/null
+    ok "Image built"
+else
+    if ! docker image inspect gascity-agent-runner:claude >/dev/null 2>&1; then
+        warn "image gascity-agent-runner:claude not present — re-run without --no-build"
+        exit 1
+    fi
+    ok "Image already present (build skipped)"
 fi
 
 # ---------------------------------------------------------------------------
-# 2. Install shim
+# 3. Install the shim
 # ---------------------------------------------------------------------------
-echo "→ installing shim to $SHIM_BIN_DIR/gc-docker-runner"
-mkdir -p "$SHIM_BIN_DIR"
+mkdir -p "$SHIM_BIN_DIR" "$LOG_DIR"
 cp shim/gc-docker-runner "$SHIM_BIN_DIR/gc-docker-runner"
 chmod +x "$SHIM_BIN_DIR/gc-docker-runner"
+ok "Shim installed at $SHIM_BIN_DIR/gc-docker-runner"
 
 # ---------------------------------------------------------------------------
-# 3. Config
+# 4. Default config (idempotent — never clobbers an existing config)
 # ---------------------------------------------------------------------------
-mkdir -p "$CONFIG_DIR" "$LOG_DIR"
+mkdir -p "$CONFIG_DIR"
 if [ ! -f "$CONFIG_DIR/config.toml" ]; then
-    echo "→ writing default config to $CONFIG_DIR/config.toml"
     cp shim/config.example.toml "$CONFIG_DIR/config.toml"
+    ok "Default config written to $CONFIG_DIR/config.toml"
 else
-    echo "→ config already exists at $CONFIG_DIR/config.toml (leaving it alone)"
+    ok "Existing config preserved at $CONFIG_DIR/config.toml"
 fi
 
 # ---------------------------------------------------------------------------
-# 4. Symlinks (claude → shim)
+# 5. claude symlink
 # ---------------------------------------------------------------------------
-if [ "$DO_SYMLINK" -eq 1 ]; then
-    echo "→ symlinking $SHIM_BIN_DIR/claude → gc-docker-runner"
-    ln -sf gc-docker-runner "$SHIM_BIN_DIR/claude"
+ln -sf gc-docker-runner "$SHIM_BIN_DIR/claude"
+ok "Symlinked $SHIM_BIN_DIR/claude → gc-docker-runner"
+
+# ---------------------------------------------------------------------------
+# 6. Add to shell PATH (idempotent, marker-fenced for clean removal)
+# ---------------------------------------------------------------------------
+detect_rc() {
+    case "${SHELL##*/}" in
+        zsh)  echo "$HOME/.zshrc" ;;
+        bash) [ -f "$HOME/.bashrc" ] && echo "$HOME/.bashrc" || echo "$HOME/.bash_profile" ;;
+        *)    echo "$HOME/.profile" ;;
+    esac
+}
+RC="$(detect_rc)"
+MARKER_BEGIN='# >>> learning-gascity shim PATH (managed by install.sh)'
+MARKER_END='# <<< learning-gascity shim PATH'
+
+if [ -f "$RC" ] && grep -qF "$MARKER_BEGIN" "$RC"; then
+    ok "Shim PATH already in $RC"
 else
-    echo "→ skipping claude symlink (--no-symlink)"
+    {
+        echo
+        echo "$MARKER_BEGIN"
+        echo 'export PATH="$HOME/.local/bin/gascity-shims:$PATH"'
+        echo "$MARKER_END"
+    } >> "$RC"
+    ok "Added shim PATH to $RC"
 fi
 
-# ---------------------------------------------------------------------------
-# PATH advice
-# ---------------------------------------------------------------------------
-case ":$PATH:" in
-    *":$SHIM_BIN_DIR:"*)
-        echo "  ✓ $SHIM_BIN_DIR is already on PATH"
-        ;;
-    *)
-        cat <<EOF
-
-  ⚠ $SHIM_BIN_DIR is NOT on your PATH yet. Add this to your shell rc and
-    re-source it so 'gc' (and any other tool that looks up 'claude' on
-    PATH) finds the shim before /usr/local/bin/claude:
-
-      export PATH="$SHIM_BIN_DIR:\$PATH"
-
-    Verify with:  which claude    # should print $SHIM_BIN_DIR/claude
-EOF
-        ;;
+# Make this PATH active for verify.sh + any subsequent commands in this shell.
+case ":${PATH:-}:" in
+    *":$SHIM_BIN_DIR:"*) ;;
+    *) export PATH="$SHIM_BIN_DIR:$PATH" ;;
 esac
 
+# ---------------------------------------------------------------------------
+# 7. Verify
+# ---------------------------------------------------------------------------
+if [ "$DO_VERIFY" -eq 1 ]; then
+    say "Running 7 isolation probes (verify.sh)"
+    if ./verify.sh; then
+        ok "All probes passed"
+    else
+        warn "Some probes failed — see output above. Install is otherwise complete."
+        exit 1
+    fi
+else
+    ok "Skipped verify.sh (--no-verify)"
+fi
+
+# ---------------------------------------------------------------------------
+# Done
+# ---------------------------------------------------------------------------
+echo
+printf '\e[1;32m✓ Ready.\e[0m\n\n'
 cat <<EOF
+   Open a new terminal (or run: source $RC) to pick up the PATH change,
+   then use Gas City as normal:
 
-→ install complete.
+       gc init ~/my-city
+       cd ~/my-city
+       gc rig add ~/code/some-repo
+       bd create "do a thing"
+       gc start
 
-   Next:
-     1. Make sure $SHIM_BIN_DIR is first on your PATH (see note above).
-     2. Edit ~/.config/gascity-docker-runner/config.toml if you need to
-        tweak limits or pin a different image.
-     3. Run ./verify.sh to confirm the 7 isolation probes pass.
-     4. Use Gas City normally — gc init / gc rig add / gc start. The shim
-        sits between gc-supervisor and the agent CLI; nothing else changes.
+   Agents the supervisor spawns will run inside scoped Docker containers
+   automatically. Logs at: $LOG_DIR
+
+   To remove this setup:  ./uninstall.sh
 EOF
