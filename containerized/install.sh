@@ -95,12 +95,16 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 3. Install the shim (NOT on global PATH)
+# 3. Install the shim + wire-shim helper (NOT on global PATH)
 # ---------------------------------------------------------------------------
 mkdir -p "$SHIM_BIN_DIR" "$LOG_DIR"
 cp shim/gc-docker-runner "$SHIM_BIN_DIR/gc-docker-runner"
 chmod +x "$SHIM_BIN_DIR/gc-docker-runner"
 ok "Shim installed at $SHIM_BIN_DIR/gc-docker-runner"
+
+cp wire-shim.sh "$SHIM_BIN_DIR/wire-shim.sh"
+chmod +x "$SHIM_BIN_DIR/wire-shim.sh"
+ok "Wire-shim helper installed at $SHIM_BIN_DIR/wire-shim.sh"
 
 # ---------------------------------------------------------------------------
 # 4. Default config (idempotent)
@@ -229,17 +233,19 @@ fi
 echo
 printf '\e[1;32m✓ Ready.\e[0m\n\n'
 cat <<EOF
-   Your normal claude and gc are UNCHANGED. To wire a city through the
-   shim, set start_command on each agent in that city's pack.toml:
+   Your normal claude and gc are UNCHANGED. Cities are auto-wired
+   through the shim by gc-docker-start.sh, which calls wire-shim.sh
+   ($SHIM_BIN_DIR/wire-shim.sh) before booting the supervisor — that
+   helper inserts 'start_command = "$SHIM_BIN_DIR/claude"' into every
+   [[agent]] block in the city's pack.toml and city.toml.
 
-       [[agent]]
-       name = "mayor"     # or polecat, deacon, witness, etc.
-       start_command = "$SHIM_BIN_DIR/claude"
+   For ad-hoc wiring of any city, run:
+       $SHIM_BIN_DIR/wire-shim.sh /path/to/city
 
-   gc honors that as the absolute path to invoke instead of looking up
-   'claude' on PATH (verifiable via 'gc config explain'). Polecats with
-   GC_RIG_PATH set will hit the docker path; city-scoped agents
-   (mayor, deacon, boot) will pass through to the host claude binary.
+   Confirm with 'gc config explain' — each agent should show a
+   start_command line. Polecats with GC_RIG_PATH set will hit the
+   docker path; city-scoped agents (mayor, deacon, boot) will pass
+   through to the host claude binary.
 
    Examples:
        gc <anything>             # exactly as before — agents run on host

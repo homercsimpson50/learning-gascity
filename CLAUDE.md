@@ -257,27 +257,43 @@ plan was PATH-based: put `~/.local/bin/gascity-shims/` ahead of
    symlink to point at the host binary on every full launch.
 
 The robust wiring is to bypass PATH lookup entirely by setting
-`start_command` per-agent in the city's `pack.toml`:
+`start_command` per-agent in the city's `pack.toml` / `city.toml`:
 
 ```toml
 [[agent]]
 name = "mayor"
 prompt_template = "agents/mayor/prompt.template.md"
-start_command = "/Users/<you>/.local/bin/gascity-shims/claude"
+start_command = "$HOME/.local/bin/gascity-shims/claude"  # absolute path required
 ```
 
-Repeat for every agent that should run through the shim (mayor, deacon,
-boot, witness, refinery, polecat, etc.). gc honors `start_command` as
-the absolute executable to invoke instead of doing a PATH lookup for
-`claude`. Confirmed via `gc config explain` (it appears in the resolved
-agent config) and behaviorally — when set, the supervisor's spawn ends
-with `… /Users/<you>/.local/bin/gascity-shims/claude` directly.
+`gascity-docker-start.sh` automates this. Before bringing up the
+supervisor it invokes `containerized/wire-shim.sh` (installed at
+`~/.local/bin/gascity-shims/wire-shim.sh`), which walks `pack.toml` and
+`city.toml` in the city dir and inserts a `start_command = "$HOME/.local/bin/gascity-shims/claude"`
+line into every `[[agent]]` block that doesn't already have one.
+Idempotent — re-runs are no-ops; one `.wire-shim.bak` backup is written
+the first time a file is patched.
+
+You can run it ad-hoc against any city:
+
+```bash
+~/.local/bin/gascity-shims/wire-shim.sh /path/to/city
+```
+
+Confirm a city is wired with `gc config explain`: every agent should
+show a `start_command = …` line. Behaviorally, the supervisor's tmux
+spawn for an agent should end with `… /Users/<you>/.local/bin/gascity-shims/claude`
+directly (rather than a `sh -c '… exec claude …'` PATH-lookup chain).
 
 Mayor, deacon, boot, etc. don't have `GC_RIG_PATH` set (they're
 city-scoped, not rig-scoped), so the shim's passthrough mode runs the
 real claude binary on the host. Polecat-like agents that DO have
 `GC_RIG_PATH` set go through the docker-run path. Both behaviors are
 correct.
+
+`gc` rejects `[agent_defaults] start_command = …` as an unknown field, so
+a single workspace-level default isn't possible — wire-shim is the
+substitute.
 
 #### How an agent invocation flows
 

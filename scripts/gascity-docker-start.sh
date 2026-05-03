@@ -65,6 +65,20 @@ if [ ! -f "$CITY/city.toml" ]; then
 fi
 mkdir -p "$(dirname "$LOG_FILE")"
 
+# --- Pre-flight: wire start_command into every [[agent]] block -------------
+# gc-supervisor invokes `start_command` (set per-agent in pack.toml /
+# city.toml) as the absolute path of the executable to spawn. Without
+# that, gc falls back to PATH lookup for `claude` and finds the host
+# binary at ~/.local/bin/claude — so the shim is bypassed and agents
+# run on the host instead of in containers. The wire-shim helper edits
+# the city's TOML in place to add the start_command line. Idempotent —
+# safe to run on every boot. See containerized/wire-shim.sh.
+if [ -x "$SHIM_DIR/wire-shim.sh" ]; then
+    "$SHIM_DIR/wire-shim.sh" "$CITY" 2>&1 | sed 's/^/    /'
+else
+    echo "${YELLOW}    wire-shim helper missing at $SHIM_DIR/wire-shim.sh — re-run containerized/install.sh${NC}" >&2
+fi
+
 # --- Step 1: stop any existing supervisor (local launchd OR previous docker) -
 # There can only be one supervisor on the machine. Whichever one is up
 # right now — local (launchd) or a previous shim-aware backgrounded one —

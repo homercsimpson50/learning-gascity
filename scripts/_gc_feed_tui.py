@@ -611,7 +611,7 @@ class GCFeedApp(App):
         directory (the encoded cwd). HQ → 'mayor'; otherwise, last segment
         of the cwd."""
         d = os.path.basename(os.path.dirname(log_file_path))  # encoded cwd
-        # decode: -Users-homer-gc → /Users/homer/gc
+        # decode: -Users-foo-gc → /Users/foo/gc
         cwd = d.replace("-", "/")
         if cwd == CITY_DIR or cwd.endswith("/gc"):
             return "mayor"
