@@ -21,7 +21,10 @@ say()  { printf '\e[1;36m→\e[0m %s\n' "$*"; }
 ok()   { printf '\e[1;32m✓\e[0m %s\n' "$*"; }
 warn() { printf '\e[1;33m⚠\e[0m %s\n' "$*"; }
 
-# Restore ~/.local/bin/claude before removing the shim it points at.
+# An older revision of install.sh used to symlink ~/.local/bin/claude to
+# the shim. Current install.sh doesn't, but if a user is uninstalling on
+# a machine that ran the older script, restore the host claude binary
+# from the .real-claude sidecar before removing the shim.
 USER_CLAUDE="$HOME/.local/bin/claude"
 REAL_CLAUDE_SIDECAR="$SHIM_BIN_DIR/.real-claude"
 if [ -L "$USER_CLAUDE" ] && [ "$(readlink "$USER_CLAUDE")" = "$SHIM_BIN_DIR/gc-docker-runner" ]; then

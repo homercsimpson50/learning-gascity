@@ -124,20 +124,20 @@ the personal-laptop path.
   gc-docker-stop.sh  →                  (symlinks back to scripts/)
   gc-workspace-home.{sh,py} →         iTerm2 launchers for each path
   gc-workspace-work.{sh,py} →           (symlinks back to scripts/)
-  claude → gascity-shims/             shim is the user-facing claude;
-    gc-docker-runner                    falls through to real binary when
-                                        GC_RIG_PATH unset (interactive use).
-                                        Required because tmux login shells
-                                        re-run zprofile/path_helper, which
-                                        reorders PATH so this dir wins over
-                                        gascity-shims/. See install.sh §5.
-  gascity-shims/
+  claude                              user's normal claude — UNTOUCHED by
+                                      install.sh. gc reaches the shim by
+                                      absolute path via per-agent
+                                      start_command in pack.toml; no PATH
+                                      lookup is involved. (See "Wiring up
+                                      start_command" below.)
+  gascity-shims/                      NOT on the global PATH:
     gc-docker-runner                  the actual shim (built by install.sh)
     claude → gc-docker-runner         shim is selected by argv[0]
     .real-claude                      sidecar holding absolute path to the
-                                      real Claude Code binary (captured at
-                                      install time; re-run install.sh after
-                                      claude auto-updates if it bricks)
+                                      real Claude Code binary; the shim's
+                                      passthrough mode (GC_RIG_PATH unset)
+                                      execs this if it ever gets invoked
+                                      outside the gc spawn path
 ~/.config/gascity-docker-runner/
   config.toml                         shim config: image map, network, limits
 ~/.local/state/gascity-docker-runner/
@@ -237,18 +237,62 @@ containerized/
 ├── shim/
 │   ├── gc-docker-runner    bash; reads argv[0] to pick agent, builds docker run, forwards stdio + signals
 │   └── config.example.toml image map, network mode, limits
-├── install.sh              build image + install shim + symlink claude → shim + drop default config
+├── install.sh              build image + install shim + capture .real-claude sidecar + drop default config
 └── verify.sh               7 isolation probes from spec §8
 ```
+
+#### Wiring up `start_command`
+
+The shim only runs if gc-supervisor actually invokes it. Originally the
+plan was PATH-based: put `~/.local/bin/gascity-shims/` ahead of
+`~/.local/bin/` and let the supervisor find `claude` → shim. That
+**doesn't work** on macOS for two reasons:
+
+1. The user's `~/.zprofile` prepends `~/.local/bin` to PATH, and gc
+   normalizes/rebuilds PATH for spawned tmux sessions, so
+   `~/.local/bin` ends up ahead of `gascity-shims/` no matter what the
+   supervisor's own PATH looks like.
+2. Putting the shim *at* `~/.local/bin/claude` (winning by sitting in
+   the same dir) gets clobbered: claude's auto-updater rewrites that
+   symlink to point at the host binary on every full launch.
+
+The robust wiring is to bypass PATH lookup entirely by setting
+`start_command` per-agent in the city's `pack.toml`:
+
+```toml
+[[agent]]
+name = "mayor"
+prompt_template = "agents/mayor/prompt.template.md"
+start_command = "/Users/<you>/.local/bin/gascity-shims/claude"
+```
+
+Repeat for every agent that should run through the shim (mayor, deacon,
+boot, witness, refinery, polecat, etc.). gc honors `start_command` as
+the absolute executable to invoke instead of doing a PATH lookup for
+`claude`. Confirmed via `gc config explain` (it appears in the resolved
+agent config) and behaviorally — when set, the supervisor's spawn ends
+with `… /Users/<you>/.local/bin/gascity-shims/claude` directly.
+
+Mayor, deacon, boot, etc. don't have `GC_RIG_PATH` set (they're
+city-scoped, not rig-scoped), so the shim's passthrough mode runs the
+real claude binary on the host. Polecat-like agents that DO have
+`GC_RIG_PATH` set go through the docker-run path. Both behaviors are
+correct.
 
 #### How an agent invocation flows
 
 1. `gc-supervisor` decides to spawn an agent for a bead.
-2. It execs `claude <args>` with `GC_RIG_PATH`, `GC_BEAD_ID`, `GC_AGENT_NAME`,
-   `GC_SESSION_ID` exported.
-3. PATH lookup hits `~/.local/bin/gascity-shims/claude` first
-   (a symlink to `gc-docker-runner`).
-4. The shim:
+2. It execs the agent's `start_command` (set in `pack.toml`) — for the
+   gc-docker city this is `/Users/<you>/.local/bin/gascity-shims/claude`,
+   a symlink to `gc-docker-runner`. `GC_RIG_PATH`, `GC_BEAD_ID`,
+   `GC_AGENT_NAME`, `GC_SESSION_ID` are exported in the spawn env.
+3. argv[0] is `claude` (from the symlink name), telling the shim which
+   agent it's standing in for.
+4. The shim, if `GC_RIG_PATH` is unset, exec's the real claude binary
+   (path captured into `.real-claude` at install time) and exits — the
+   agent runs on the host. This is the right behavior for city-scoped
+   agents (mayor, deacon, boot) which don't have a worktree to mount.
+5. If `GC_RIG_PATH` IS set (rig-scoped agents like polecats), the shim:
    - Reads `~/.config/gascity-docker-runner/config.toml` for the image
      mapping, network mode, and limits.
    - Builds a `docker run` with `/work` bind-mounted to `GC_RIG_PATH`,
