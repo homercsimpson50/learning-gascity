@@ -1,271 +1,102 @@
-# Containerized Gas City — Option A (host `gc`, agents in scoped containers)
+# `containerized/` — directory reference
 
-This directory implements **Option A** from
-[`docs/containerizing-gascity-for-local-use-spec.md`](../docs/containerizing-gascity-for-local-use-spec.md):
-
-- **`gc` (the supervisor + CLI) runs on your host**, unchanged. You get
-  fast iteration, native `gc status`, normal logs, the launchd service.
-- **Every agent invocation goes through a Docker container**, scoped to a
-  single rig worktree, with no host credentials and no host filesystem
-  access outside `/work`.
-
-The container is the smallest blast radius around the actual risk:
-the coding agent (`claude`, `codex`, `gemini`, ...) — *not* `gc` itself.
+This directory implements the work-machine setup. **For step-by-step
+install and use, read [`../docs/work-machine.md`](../docs/work-machine.md).**
+This file is a reference for what each piece in here does, useful when
+you're poking at the implementation.
 
 ```
 containerized/
-├── README.md              ← you are here
-├── agent-runner/          ← image: minimal Debian + agent CLI + entrypoint
-│   ├── Dockerfile
-│   └── entrypoint.sh
+├── README.md              ← you are here (reference)
+├── agent-runner/          image built locally as gascity-agent-runner:claude
+│   ├── Dockerfile         debian-slim + nodejs + Claude Code via npm
+│   └── entrypoint.sh      validates env contract, drops to agent user, execs CLI
 ├── shim/
-│   ├── gc-docker-runner   ← bash; converts `claude …` → `docker run …`
-│   ├── gc-docker          ← user-facing wrapper: `gc-docker <gc subcommand>`
-│   └── config.example.toml
-├── install.sh             ← docker check, build, install shim + wrapper, verify
-├── uninstall.sh           ← reverse install.sh
-└── verify.sh              ← runs the seven isolation probes from the spec §8
+│   ├── gc-docker-runner   bash; argv[0] picks agent, builds docker run, forwards stdio + signals
+│   ├── gc-docker          user-facing wrapper: prepends shim dir to PATH, execs gc
+│   └── config.example.toml image map, network mode, limits
+├── install.sh             docker check → image build → shim + wrapper install → verify
+├── uninstall.sh           reverse install.sh (preserves image, config, logs)
+└── verify.sh              7 isolation probes from spec §8
 ```
-
-> **No global PATH change.** `install.sh` does **not** touch your
-> `~/.zshrc`. Your normal `claude` and `gc` keep working exactly as
-> before. To run gc with sandboxed agents, you explicitly type
-> **`gc-docker`** instead of `gc`. Everything else flows through.
 
 ---
 
-## Architecture
+## How an agent invocation flows
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  Host (your laptop)                                         │
-│                                                             │
-│   You type:  gc-docker supervisor run                       │
-│                  │                                          │
-│                  │  prepends shim dir to its OWN PATH       │
-│                  ▼  then exec gc supervisor run             │
-│   gc-supervisor ──► runtime provider                        │
-│                          │                                  │
-│                          ▼  exec("claude" …)                │
-│             ~/.local/bin/gascity-shims/claude  ← shim       │
-│                          │   (only on PATH because          │
-│                          │    gc-docker put it there;       │
-│                          │    your interactive shell is     │
-│                          │    completely untouched)         │
-│                          ▼  docker run …                    │
-│   ┌──────────────────────┴──────────────────────────────┐   │
-│   │ Container: gascity-agent-runner:claude              │   │
-│   │   - claude CLI                                      │   │
-│   │   - rig worktree at /work (rw)                      │   │
-│   │   - --read-only rootfs, tmpfs /tmp + ~/.cache       │   │
-│   │   - --user 1000:1000, cap_drop ALL                  │   │
-│   │   - --memory 4g --cpus 2 --pids-limit 512           │   │
-│   │   - secrets only via -e env vars                    │   │
-│   └─────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────┘
+You type:        gc-docker supervisor run
+                     │
+                     │  prepends ~/.local/bin/gascity-shims to its OWN PATH
+                     ▼  exec gc supervisor run
+gc-supervisor   ─►   runtime provider
+                     │
+                     │  exec("claude", …)  — supervisor inherits the wrapper's PATH
+                     ▼
+~/.local/bin/gascity-shims/claude  (symlink → gc-docker-runner)
+                     │
+                     │  reads ~/.config/gascity-docker-runner/config.toml,
+                     │  builds docker run with /work bind, --read-only,
+                     │  --cap-drop ALL, --user 1000:1000, etc.,
+                     ▼  forwards stdio + signals
+docker container: gascity-agent-runner:claude
+   /work     = the rig worktree (rw)
+   /tmp      = tmpfs
+   ~/.cache  = tmpfs
+   no host SSH keys, no AWS creds, no docker socket
 ```
 
-Spec reference: [§2 design overview](../docs/containerizing-gascity-for-local-use-spec.md#2-design-overview).
+Your interactive shell never sees the shim — only `gc-docker`'s child
+processes do.
 
 ---
 
-## Quick start
+## Hard rules for the shim's `docker run` flags
 
-### Brand-new machine
+Do **not** relax any of these without re-reading the
+[spec §4](../docs/containerizing-gascity-for-local-use-spec.md#4-container-invocation-rules):
 
-Use the top-level bootstrap, which installs gc / bd / dolt / flock for
-you (via Homebrew + the official tap) before running `install.sh`:
+- Never mount `$HOME`, `~/.aws`, `~/.ssh`, `~/.config` (other than
+  what's explicitly in the env whitelist).
+- Never mount `/var/run/docker.sock`. Docker-in-Docker = root on host.
+- Never add `--privileged`, `--cap-add`, `--device`, `--pid=host`,
+  `--net=host`, `--ipc=host`.
+- Never drop `--cap-drop=ALL` or `--security-opt=no-new-privileges`.
+- Never drop `--user 1000:1000`.
+- Never drop the rootfs `--read-only` flag.
 
-```bash
-git clone https://github.com/homercsimpson50/learning-gascity ~/code/learning-gascity
-cd ~/code/learning-gascity
-./bootstrap.sh
-```
-
-Prereqs: **git** and **Docker Desktop** (anything else is auto-installed).
-
-### Already-set-up machine
-
-If `gc` is already on your PATH, just run `install.sh` directly:
-
-```bash
-./install.sh
-```
-
-That installs the shim, the `gc-docker` wrapper, the default config,
-builds the agent image, and runs `verify.sh`. **It does not touch your
-shell's PATH.** Your `claude` and `gc` keep working exactly as before.
-
-### Use it
-
-```bash
-# Normal local gc — agents run on the host:
-gc init ~/my-city
-gc start
-
-# Containerized — agents run inside Docker:
-gc-docker init ~/test-city          # any gc subcommand works through the wrapper
-gc-docker supervisor run            # foreground supervisor with sandboxed agents
-```
-
-Verify nothing was changed:
-
-```bash
-which claude       # → /Users/you/.local/bin/claude  (your normal claude)
-which gc           # → /Users/you/.local/bin/gc      (your normal gc)
-which gc-docker    # → /Users/you/.local/bin/gc-docker  (the new wrapper)
-```
-
-### Uninstall
-
-`./uninstall.sh` removes the shim, the wrapper, and any leftover PATH
-lines from older versions of `install.sh`. The image, your config, and
-session logs are preserved (instructions to delete them are printed).
-
-### How the wrapper works
-
-`gc-docker` does exactly two things, in this order:
-
-1. Prepends `~/.local/bin/gascity-shims` to its *own* PATH.
-2. `exec`s `gc "$@"`.
-
-`gc` and its child supervisor inherit that PATH. When the supervisor
-later does `exec("claude", …)`, the shim wins the PATH lookup and
-translates the call into a hardened `docker run` against
-`gascity-agent-runner:claude`. Your interactive shell never sees the
-shim — only `gc-docker`'s child processes do.
-
----
-
-## What you get
-
-| Concern | How Option A handles it |
-|---|---|
-| Agent reads `~/.aws/credentials` | Path doesn't exist in container; no `~/.aws` is mounted. |
-| Agent runs `rm -rf $HOME` | `$HOME` inside container is a tmpfs that disappears on container exit; host home untouched. |
-| Agent reads `~/.ssh` | Same as above — not mounted. |
-| Agent runs `docker ps` to escape | Docker CLI not installed in image; `/var/run/docker.sock` not mounted. |
-| Agent forks 5,000 procs | `--pids-limit 512` cuts it off. |
-| Agent allocates 64 GB RAM | `--memory 4g` triggers OOM kill. |
-| Agent writes outside the rig | `/work` is the *only* rw bind mount. Rootfs is `--read-only`. |
-| Agent escalates privileges | `--cap-drop ALL --security-opt no-new-privileges`. |
-| Agent gets stuck forever | `timeout` field in config kills the container. |
-
-What it deliberately **doesn't** give you (be honest about the limit):
-
-- **Not a hard boundary against a malicious model.** Docker on macOS uses
-  a shared kernel via the Linux VM; a kernel-level escape compromises
-  the host. Spec §9 covers this; Option B (k8s + gVisor + NetworkPolicy)
-  is the eventual answer for that threat model.
-- **v1 has no egress allowlist.** The container uses Docker's default
-  bridge with full internet. The spec §6 outlines a dnsmasq+iptables
-  allowlist — landing that is a v2 task.
+If a probe in `verify.sh` fails after a change here, that's a security
+regression — fix the change, not the test.
 
 ---
 
 ## Configuration
 
-`install.sh` drops a default config at `~/.config/gascity-docker-runner/config.toml`.
-Edit it to:
+`install.sh` drops a default at `~/.config/gascity-docker-runner/config.toml`.
 
-- **Pin a digest** once you push the image to a registry: `claude = "registry/...@sha256:…"`.
-- **Tune limits** — bump `memory` or `cpus` if real agent work hits them.
-- **Add agents** — uncomment the `codex`/`gemini` lines after building
-  their images (one Dockerfile per agent under `agent-runner/`).
+| Section | Key | Purpose |
+|---|---|---|
+| `image` | `claude` | Image used when the shim is invoked as `claude`. Defaults to local `gascity-agent-runner:claude`. Pin to a digest once you push to a registry. |
+| `network` | `mode` | Docker network. `bridge` (default) gives full internet — fine for v1, swap to a custom allowlist network when v2 lands. |
+| `limits` | `memory`, `cpus`, `pids_limit`, `timeout` | Per-container resource caps. `timeout` (e.g. `30m`) hard-kills the container. |
 
-Override location per-invocation via `GC_DOCKER_RUNNER_CONFIG=/path/to/cfg`
-in the supervisor's environment.
-
-### Per-rig overrides (planned)
-
-The spec §4 allows a `.gc-runner.toml` in the rig root to relax specific
-things (extra allowlisted domain, raised memory). Not implemented in v1
-of the shim — track in the backlog.
+Override location per-invocation via `GC_DOCKER_RUNNER_CONFIG=/path/to/cfg`.
 
 ---
 
-## Verifying isolation
+## v1 limitations (tracked for v2)
 
-`./verify.sh` runs the seven probes from the spec §8:
-
-1. **Smoke** — container starts, writes file into rig worktree.
-2. **Footgun** — `rm -rf $HOME` inside doesn't touch host `$HOME`.
-3. **Network** — container can reach `api.anthropic.com` (proxy for "agent works"). When you wire an allowlist, replace with two checks.
-4. **Credentials** — `/root/.aws`, `/home/agent/.aws`, `/run/secrets` not visible.
-5. **Escape** — Docker socket not mounted, Docker CLI not installed.
-6. **Concurrency** — 5 parallel containers, no name collisions, all 5 write to the shared worktree cleanly.
-7. **Restart** — `docker stop` cleans up the container.
-
-Run after every config change. CI should run it on PRs that touch this
-directory.
-
----
-
-## Logs
-
-Each shim invocation tees the agent's stdio to
-`~/.local/state/gascity-docker-runner/logs/<session-id>.log`, with a
-preamble line listing image, rig, bead, and forwarded env keys (no values).
-
-Useful when a session misbehaves and you want a postmortem without
-re-running.
-
----
-
-## Wiring (how the symlink works)
-
-The shim lives at `~/.local/bin/gascity-shims/gc-docker-runner`. The
-install script symlinks `claude → gc-docker-runner` in the same directory.
-
-When `gc-supervisor` (running as your user, possibly under launchd)
-spawns an agent, it does roughly `exec("claude", args…)`. Your shell's
-`$PATH` decides which `claude` runs:
-
-```
-PATH="$HOME/.local/bin/gascity-shims:$PATH"  ← shim wins
-PATH="/usr/local/bin:$PATH"                   ← real claude wins (no isolation)
-```
-
-So **the only behavior change required** is making `~/.local/bin/gascity-shims`
-come first on the PATH that `gc-supervisor` sees. `install.sh` prints the
-exact line to add to `~/.zshrc` (or `~/.bashrc`).
-
-If you only want isolation when running gascity (and not when running
-`claude` directly elsewhere), point `gc-supervisor` at the shim
-explicitly via launchd's `EnvironmentVariables.PATH` and leave your
-interactive shell alone. That's a per-host preference; default install
-keeps things simple and global.
-
----
-
-## Uninstall
-
-```bash
-./uninstall.sh
-```
-
-Removes the shim binary, the symlinks, and the PATH lines from your
-shell rc. Leaves the agent image, your config under
-`~/.config/gascity-docker-runner/`, and session logs under
-`~/.local/state/gascity-docker-runner/` so re-install doesn't lose
-tweaks. The script prints the exact commands to delete those if you
-want a full wipe.
-
----
-
-## Migration to Option B (k8s)
-
-Spec §10. The agent image and the env-var secrets contract carry over
-unchanged. The shim is replaced by Gas City's built-in Kubernetes
-runtime provider, configured to use this same image and our PodSpec
-template. Per-rig TOML overrides become Helm values.
-
-Keeping the shim's mount paths (`/work`, `/run/secrets`), env names, and
-non-root uid stable is the deal — debugging stays portable.
+- No egress allowlist — uses Docker's default bridge with full internet
+  reachability. Spec §6 outlines a dnsmasq + iptables approach.
+- No GitHub App token minting — `GH_TOKEN` is forwarded as-is from the
+  host environment if set. Spec §5 calls for fresh per-session tokens.
+- No per-rig override TOML (`.gc-runner.toml` in the rig root) yet.
+- One image per agent (`claude` only). Building `codex` / `gemini`
+  images is one Dockerfile each under `agent-runner/`.
 
 ---
 
 ## Reference
 
-- Full spec: [`../docs/containerizing-gascity-for-local-use-spec.md`](../docs/containerizing-gascity-for-local-use-spec.md)
-- Upstream: <https://github.com/gastownhall/gascity>
+- [Step-by-step setup + daily use](../docs/work-machine.md)
+- [Architecture spec](../docs/containerizing-gascity-for-local-use-spec.md)

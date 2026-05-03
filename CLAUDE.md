@@ -7,68 +7,63 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 This repo is a **harness** for upstream
 [gastownhall/gascity](https://github.com/gastownhall/gascity). Gas City source
 lives upstream — never vendored here. There is no Go/Python/JS code to lint
-or test. Two ways to run gascity, side by side:
+or test.
 
-- **`containerized/`** — implements **Option A** from
-  [`docs/containerizing-gascity-for-local-use-spec.md`](docs/containerizing-gascity-for-local-use-spec.md).
-  `gc` runs natively on the host; only **agent invocations** (`claude`,
-  `codex`, `gemini`) are wrapped in scoped Docker containers via a host-side
-  shim (`gc-docker-runner`) symlinked as `claude` on PATH. Use this when
-  you want gascity native but agents sandboxed (corporate laptop, untrusted
-  agents, machines with cloud creds in env).
-- **`scripts/`** — local launcher. The `gascity-workspace.{sh,py}` scripts
-  open an iTerm2 layout against a **local** city at `~/gc`, mirroring the
-  layout used for gastown at `~/gt`. Use this when you want gascity native
-  on the host *with no agent isolation* (personal/throwaway machine).
+**Two user-facing paths, each with its own how-to:**
 
-The previous all-in-one Dockerfile that put `gc` itself inside a container
-has been removed. If you see references to `docker compose up -d` against
-the gascity service, those are stale — Option A does not run `gc` in Docker.
+- [`docs/personal-laptop.md`](docs/personal-laptop.md) — local install, `gc` and agents both on host. The `scripts/` directory holds the helpers (iTerm2 workspace, gc-feed-ai). Use when the user is on a throwaway / personal machine.
+- [`docs/work-machine.md`](docs/work-machine.md) — containerized agents. `gc` on host; agents in scoped Docker containers via the shim + `gc-docker` wrapper in `containerized/`. Use when the user is on a corporate / shared machine.
+
+**When the user asks for help, identify which path they're on first.**
+The two how-tos are the source of truth for user-visible flow. Don't
+duplicate that content in answers — point at the relevant doc and add
+only what's not there.
 
 When the user asks to "fix gascity behavior X," check whether X lives in this
-harness (shim, agent image entrypoint, install script, workspace script) or
-upstream (the `gc` CLI itself, formulas, beads, runtime providers). Upstream
-fixes need a `gc` binary upgrade — not edits here.
+harness (shim, agent image entrypoint, install/bootstrap script, workspace
+script) or upstream (the `gc` CLI itself, formulas, beads, runtime providers).
+Upstream fixes need a `gc` binary upgrade — not edits here.
 
-## Common commands
+## Source-of-truth files
 
-### Containerized (Option A — `containerized/`)
+- [`docs/personal-laptop.md`](docs/personal-laptop.md) — user how-to: local install, daily commands, troubleshooting.
+- [`docs/work-machine.md`](docs/work-machine.md) — user how-to: containerized install, daily commands, troubleshooting.
+- [`docs/containerizing-gascity-for-local-use-spec.md`](docs/containerizing-gascity-for-local-use-spec.md) — design spec the containerized path implements.
+- [`containerized/README.md`](containerized/README.md) — directory reference for `containerized/` (architecture, hard rules, config knobs, v1 limitations).
+- [`bootstrap.sh`](bootstrap.sh) — brand-new-machine entry for the work-machine path. Installs gc/bd/dolt/flock then hands off to `containerized/install.sh`.
+- This file — guidance for editing the repo, not for using gascity.
+
+## Common commands (cheat sheet)
+
+For full flows see the how-tos above. Quick reference:
+
+### Containerized
 
 ```bash
-./install.sh                # build agent image, install shim, set up symlinks, drop default config
-./install.sh --no-build     # re-install shim/symlinks/config without re-building the image
-./install.sh --uninstall    # remove shim + symlinks (image and config preserved)
-./verify.sh                 # run the seven isolation probes from spec §8
-
-# After install, on the host:
-gc init ~/my-city
-gc rig add ~/code/some-repo
-gc start
-# Agents spawned by the supervisor run inside containers transparently —
-# nothing about the gc CLI changes.
-
-# Inspect a specific session's container logs (teed by the shim):
-ls ~/.local/state/gascity-docker-runner/logs/
+./bootstrap.sh                          # brand-new machine (installs everything)
+cd containerized && ./install.sh        # already-set-up machine (just the container piece)
+cd containerized && ./verify.sh         # 7 isolation probes from spec §8
+cd containerized && ./uninstall.sh      # reverse install.sh
+gc-docker supervisor run                # foreground supervisor with sandboxed agents
+ls ~/.local/state/gascity-docker-runner/logs/   # session logs (teed by the shim)
 ```
 
-### Local (`~/gc` city, `scripts/`)
+### Local
 
 ```bash
 ./scripts/gascity-workspace.sh        # AppleScript: opens 4-pane iTerm2 layout
-./scripts/gascity-workspace.sh --ai   # Same layout, feed pane uses Ollama summary
-./scripts/gascity-workspace.py        # iTerm2 Python API equivalent (also takes --ai)
-
-cd ~/gc && gc doctor                  # health check
-cd ~/gc && gc status                  # city + sessions
-cd ~/gc && gc session attach mayor    # attach to mayor (also what the workspace's left pane runs)
-cd ~/gc && gc events --follow         # live event stream (the "feed" pane)
-cd ~/gc && ../code/learning-gascity/scripts/gc-feed-ai     # rich TUI (sessions/beads/events/AI panes; q s a r tab j/k)
-cd ~/gc && ../code/learning-gascity/scripts/gc-feed-ai --simple  # stdlib-only streaming fallback
-gc supervisor status                  # is the machine-wide supervisor up?
+./scripts/gascity-workspace.sh --ai   # same, feed pane uses Ollama summary
+./scripts/gascity-workspace.py        # iTerm2 Python API equivalent (--ai works)
+gc doctor / gc status / gc cities     # standard gc commands
+gc session attach mayor               # talk to the mayor
+gc events --follow                    # live JSON event stream
+./scripts/gc-feed-ai                  # rich TUI on top of gc events --follow
+./scripts/gc-feed-ai --simple         # stdlib-only streaming fallback
 ```
 
 There are no unit tests. Validation is `containerized/verify.sh` for
-Option A and (manually) `gc doctor` reporting clean for the local install.
+the work-machine path and (manually) `gc doctor` reporting clean for
+the personal-laptop path.
 
 ## Architecture
 
