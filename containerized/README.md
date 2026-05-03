@@ -1,166 +1,219 @@
-# Containerized Gas City
+# Containerized Gas City — Option A (host `gc`, agents in scoped containers)
 
-A clean, gascity-only Docker setup. The image is built from the upstream
-[gastownhall/gascity](https://github.com/gastownhall/gascity) repo at a
-pinned ref — you don't need to clone gascity yourself.
+This directory implements **Option A** from
+[`docs/containerizing-gascity-for-local-use-spec.md`](../docs/containerizing-gascity-for-local-use-spec.md):
+
+- **`gc` (the supervisor + CLI) runs on your host**, unchanged. You get
+  fast iteration, native `gc status`, normal logs, the launchd service.
+- **Every agent invocation goes through a Docker container**, scoped to a
+  single rig worktree, with no host credentials and no host filesystem
+  access outside `/work`.
+
+The container is the smallest blast radius around the actual risk:
+the coding agent (`claude`, `codex`, `gemini`, ...) — *not* `gc` itself.
 
 ```
 containerized/
-├── Dockerfile             # multi-stage: clones + builds gascity, runtime image
-├── docker-compose.yml     # one-service stack with security defaults
-├── docker-entrypoint.sh   # extracted entrypoint (keyring, host-cred sync, gc init)
-├── .env.example           # GIT_USER, GIT_EMAIL, GASCITY_REF, …
-└── README.md              # you are here
+├── README.md              ← you are here
+├── agent-runner/          ← image: minimal Debian + agent CLI + entrypoint
+│   ├── Dockerfile
+│   └── entrypoint.sh
+├── shim/                  ← host-side wrapper invoked by the supervisor
+│   ├── gc-docker-runner   ← bash; converts `claude …` → `docker run …`
+│   └── config.example.toml
+├── install.sh             ← build image, install shim, set up symlinks, write config
+└── verify.sh              ← runs the seven isolation probes from the spec §8
 ```
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Host (your laptop)                                         │
+│                                                             │
+│   gc (CLI) ──► gc-supervisor ──► runtime provider           │
+│                                       │                     │
+│                                       ▼  exec("claude" …)   │
+│                          ~/.local/bin/gascity-shims/claude  │
+│                                       │                     │
+│                                       ▼  docker run …       │
+│   ┌───────────────────────────────────┴─────────────────┐   │
+│   │ Container: gascity-agent-runner:claude              │   │
+│   │   - claude CLI                                      │   │
+│   │   - rig worktree at /work (rw)                      │   │
+│   │   - --read-only rootfs, tmpfs /tmp + ~/.cache       │   │
+│   │   - --user 1000:1000, cap_drop ALL                  │   │
+│   │   - --memory 4g --cpus 2 --pids-limit 512           │   │
+│   │   - secrets only via -e env vars                    │   │
+│   └─────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+Spec reference: [§2 design overview](../docs/containerizing-gascity-for-local-use-spec.md#2-design-overview).
 
 ---
 
 ## Quick start
 
 ```bash
-cd containerized/
-cp .env.example .env
-# edit .env so GIT_USER / GIT_EMAIL aren't "TestUser"
+# 1. From this directory:
+./install.sh
 
-docker compose up -d --build
-docker compose exec gascity gc version
-docker compose exec gascity gc doctor
+# 2. Add the shim dir to PATH (install.sh tells you the line to paste).
+#    The shim must come BEFORE the real claude on PATH.
+export PATH="$HOME/.local/bin/gascity-shims:$PATH"
 
-# add a rig from your host's ~/code (bind-mounted at /city/rigs-host)
-docker compose exec gascity bash -c \
-    "cd /city/rigs-host/<your-repo> && gc rig add ."
+# 3. Verify isolation works.
+./verify.sh
+# → 7 probes pass (smoke, footgun, network, credentials, escape,
+#   concurrency, restart).
 
-# drop into a shell to drive Gas City
-docker compose exec gascity bash
+# 4. Use Gas City normally on your host. The shim sits transparently in
+#    the middle.
+gc init ~/my-city
+cd ~/my-city
+gc rig add ~/code/some-repo
+bd create "do a thing"
+gc start
 ```
 
-To stop:
+When `gc-supervisor` execs `claude`, your shell's PATH lookup hits
+`~/.local/bin/gascity-shims/claude` first, which is a symlink to
+`gc-docker-runner`. The shim forwards stdio + signals into the container
+and exits with the container's exit code. Gas City sees a normal
+process — it has no idea it just talked to a container.
+
+---
+
+## What you get
+
+| Concern | How Option A handles it |
+|---|---|
+| Agent reads `~/.aws/credentials` | Path doesn't exist in container; no `~/.aws` is mounted. |
+| Agent runs `rm -rf $HOME` | `$HOME` inside container is a tmpfs that disappears on container exit; host home untouched. |
+| Agent reads `~/.ssh` | Same as above — not mounted. |
+| Agent runs `docker ps` to escape | Docker CLI not installed in image; `/var/run/docker.sock` not mounted. |
+| Agent forks 5,000 procs | `--pids-limit 512` cuts it off. |
+| Agent allocates 64 GB RAM | `--memory 4g` triggers OOM kill. |
+| Agent writes outside the rig | `/work` is the *only* rw bind mount. Rootfs is `--read-only`. |
+| Agent escalates privileges | `--cap-drop ALL --security-opt no-new-privileges`. |
+| Agent gets stuck forever | `timeout` field in config kills the container. |
+
+What it deliberately **doesn't** give you (be honest about the limit):
+
+- **Not a hard boundary against a malicious model.** Docker on macOS uses
+  a shared kernel via the Linux VM; a kernel-level escape compromises
+  the host. Spec §9 covers this; Option B (k8s + gVisor + NetworkPolicy)
+  is the eventual answer for that threat model.
+- **v1 has no egress allowlist.** The container uses Docker's default
+  bridge with full internet. The spec §6 outlines a dnsmasq+iptables
+  allowlist — landing that is a v2 task.
+
+---
+
+## Configuration
+
+`install.sh` drops a default config at `~/.config/gascity-docker-runner/config.toml`.
+Edit it to:
+
+- **Pin a digest** once you push the image to a registry: `claude = "registry/...@sha256:…"`.
+- **Tune limits** — bump `memory` or `cpus` if real agent work hits them.
+- **Add agents** — uncomment the `codex`/`gemini` lines after building
+  their images (one Dockerfile per agent under `agent-runner/`).
+
+Override location per-invocation via `GC_DOCKER_RUNNER_CONFIG=/path/to/cfg`
+in the supervisor's environment.
+
+### Per-rig overrides (planned)
+
+The spec §4 allows a `.gc-runner.toml` in the rig root to relax specific
+things (extra allowlisted domain, raised memory). Not implemented in v1
+of the shim — track in the backlog.
+
+---
+
+## Verifying isolation
+
+`./verify.sh` runs the seven probes from the spec §8:
+
+1. **Smoke** — container starts, writes file into rig worktree.
+2. **Footgun** — `rm -rf $HOME` inside doesn't touch host `$HOME`.
+3. **Network** — container can reach `api.anthropic.com` (proxy for "agent works"). When you wire an allowlist, replace with two checks.
+4. **Credentials** — `/root/.aws`, `/home/agent/.aws`, `/run/secrets` not visible.
+5. **Escape** — Docker socket not mounted, Docker CLI not installed.
+6. **Concurrency** — 5 parallel containers, no name collisions, all 5 write to the shared worktree cleanly.
+7. **Restart** — `docker stop` cleans up the container.
+
+Run after every config change. CI should run it on PRs that touch this
+directory.
+
+---
+
+## Logs
+
+Each shim invocation tees the agent's stdio to
+`~/.local/state/gascity-docker-runner/logs/<session-id>.log`, with a
+preamble line listing image, rig, bead, and forwarded env keys (no values).
+
+Useful when a session misbehaves and you want a postmortem without
+re-running.
+
+---
+
+## Wiring (how the symlink works)
+
+The shim lives at `~/.local/bin/gascity-shims/gc-docker-runner`. The
+install script symlinks `claude → gc-docker-runner` in the same directory.
+
+When `gc-supervisor` (running as your user, possibly under launchd)
+spawns an agent, it does roughly `exec("claude", args…)`. Your shell's
+`$PATH` decides which `claude` runs:
+
+```
+PATH="$HOME/.local/bin/gascity-shims:$PATH"  ← shim wins
+PATH="/usr/local/bin:$PATH"                   ← real claude wins (no isolation)
+```
+
+So **the only behavior change required** is making `~/.local/bin/gascity-shims`
+come first on the PATH that `gc-supervisor` sees. `install.sh` prints the
+exact line to add to `~/.zshrc` (or `~/.bashrc`).
+
+If you only want isolation when running gascity (and not when running
+`claude` directly elsewhere), point `gc-supervisor` at the shim
+explicitly via launchd's `EnvironmentVariables.PATH` and leave your
+interactive shell alone. That's a per-host preference; default install
+keeps things simple and global.
+
+---
+
+## Uninstall
 
 ```bash
-docker compose down              # keep volumes (state preserved)
-docker compose down -v           # wipe state too
+./install.sh --uninstall
 ```
 
----
-
-## How it works
-
-The Dockerfile is two stages:
-
-1. **`builder`** — golang base, `git clone` of `${GASCITY_REPO}` at
-   `${GASCITY_REF}`, `make build`. Produces just `gc`.
-2. **`runtime`** — `docker/sandbox-templates:claude-code` base + Gas
-   City's runtime deps (`tmux`, `jq`, `procps`, `lsof`, `util-linux`,
-   `dbus` + `gnome-keyring` + `libsecret-1-0` for Claude Code's libsecret
-   credential storage), plus `bd` and `dolt` for the default beads
-   provider. The `gc` binary is `COPY --from=builder`ed in.
-
-The container's `CMD` is `gc supervisor run` — the foreground equivalent
-of the `gc start` command you'd use on a host (which on the host
-registers a launchd / systemd service; pointless inside a container).
-
-The entrypoint (`docker-entrypoint.sh`) does five things on every start:
-
-1. Apply git/dolt config from `GIT_USER` / `GIT_EMAIL` (idempotent).
-2. Start D-Bus + GNOME Keyring so Claude Code can persist credentials.
-3. Sync host `~/.claude` (read-only mount) into the writable home volume
-   so the container inherits your Claude Code login.
-4. Sync host `~/.config/gh/hosts.yml` so `git push` from agents works.
-5. On first run only: `gc init --provider <GC_PROVIDER> /city`.
+Removes the shim binary and any symlinks. Leaves the agent image (delete
+with `docker rmi gascity-agent-runner:claude`) and the config file (under
+`~/.config/gascity-docker-runner/`) so you can re-install without losing
+tweaks.
 
 ---
 
-## Security
+## Migration to Option B (k8s)
 
-Same posture as the gastown reference setup, distilled:
+Spec §10. The agent image and the env-var secrets contract carry over
+unchanged. The shim is replaced by Gas City's built-in Kubernetes
+runtime provider, configured to use this same image and our PodSpec
+template. Per-rig TOML overrides become Helm values.
 
-- `cap_drop: [ALL]` plus only `CHOWN`, `SETUID`, `SETGID` for keyring +
-  process bookkeeping.
-- `no-new-privileges:true` so a compromised process can't `sudo` out.
-- `pids: 512`, `memory: 4G`, `cpus: 4` — caps fork bombs and runaway
-  agent loops.
-- Host SSH keys, AWS credentials, browser profiles, the rest of
-  `~/.config` — **not** mounted. Agents physically can't read them.
-- Host `~/.claude` and `~/.config/gh` mounted **read-only** at separate
-  paths; the entrypoint copies just the files needed into a writable
-  volume so the container inherits auth without giving agents write
-  access to your host config.
-- `IS_SANDBOX=1` is set so Claude Code knows it's running in a sandbox.
+Keeping the shim's mount paths (`/work`, `/run/secrets`), env names, and
+non-root uid stable is the deal — debugging stays portable.
 
 ---
 
-## Volumes
+## Reference
 
-| Volume | Path in container | Purpose |
-|---|---|---|
-| `city-workspace` | `/city` | The city scaffold (`city.toml`, `pack.toml`, `.gc/`, agents, formulas, etc.). Lose this and `gc init` re-runs. |
-| `dolt-data` | `/city/.dolt-data` | Beads database files. Kept off bind mounts because VirtioFS fsync semantics can corrupt the dolt journal on macOS. |
-| `claude-data` | `/home/agent/.claude` | Claude Code credentials, sessions, history. |
-| `claude-state` | `/home/agent/.local/state/claude` | Claude runtime state (lockfiles, version pins). |
-| `claude-share` | `/home/agent/.local/share/claude` | Claude shared assets (theme picker won't pop on restart). |
-| (bind, rw) | `/city/rigs-host` ← `${GCC_CODE_DIR:-~/code}` | Your code; rigs added out of subdirectories. |
-| (bind, ro) | `/home/agent/.claude-host` ← `~/.claude` | Read-only Claude config staging. |
-| (bind, ro) | `/home/agent/.config/gh-host` ← `~/.config/gh` | Read-only gh CLI staging. |
-
----
-
-## Knobs
-
-All defaults work. Set in `.env`:
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `GIT_USER` | `TestUser` | git + dolt user.name (idempotent each start) |
-| `GIT_EMAIL` | `test@example.com` | Same for user.email |
-| `GC_PROVIDER` | `claude` | Coding-agent runtime registered into the city. Other valid values: `codex`, `gemini`, `cursor`, `copilot`, `amp`, `opencode`, `auggie`, `pi`, `omp` (see `gc init --help`) |
-| `GASCITY_REPO` | `https://github.com/gastownhall/gascity.git` | Source repo to build from |
-| `GASCITY_REF` | `main` | Tag, branch, or SHA to check out |
-| `GASCITY_IMAGE_TAG` | `latest` | Image tag — bump to keep versions side by side |
-| `GCC_CODE_DIR` | `~/code` | Host directory bind-mounted at `/city/rigs-host` |
-
----
-
-## Reproducible builds
-
-To pin to a specific release:
-
-```bash
-echo 'GASCITY_REF=v1.0.1'        >> .env
-echo 'GASCITY_IMAGE_TAG=v1.0.1'  >> .env
-docker compose build
-```
-
-Or build from a fork:
-
-```bash
-echo 'GASCITY_REPO=https://github.com/<fork>/gascity.git' >> .env
-echo 'GASCITY_REF=<branch-or-sha>'                        >> .env
-docker compose build
-```
-
----
-
-## Troubleshooting
-
-**`gc start` complains "missing required dependencies"**
-The container ships dolt + flock pre-installed; this should not happen
-inside the container. If it does, the dolt installer failed during
-`docker build` — re-run with `docker compose build --no-cache`.
-
-**`claude` keeps re-prompting for login**
-The `claude-data` volume is fresh and your host `~/.claude/.credentials.json`
-hasn't been synced. Check it exists on the host first: `ls ~/.claude/`.
-If you've never logged in on the host either, run `claude` once
-interactively *inside* the container.
-
-**Dolt journal corruption after `docker compose down`**
-`dolt-data` should always be on a Docker volume, never on a macOS bind
-mount. The compose file already does this — don't change it.
-
-**`gc rig add` says path not found**
-Rigs must be added from inside the container against the bind-mounted
-path: `/city/rigs-host/<repo>`, not the host path.
-
-**Build fails fetching gascity**
-The default `GASCITY_REF` is `main` — if upstream is mid-rewrite, pin to
-a release tag in `.env` and rebuild.
+- Full spec: [`../docs/containerizing-gascity-for-local-use-spec.md`](../docs/containerizing-gascity-for-local-use-spec.md)
+- Upstream: <https://github.com/gastownhall/gascity>

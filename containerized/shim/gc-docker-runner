@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+# gc-docker-runner — host-side shim that translates an agent invocation
+# from Gas City into a `docker run` against gascity-agent-runner.
+#
+# Symlinked as `claude` (and optionally `codex`, `gemini`, etc.) earlier
+# on PATH than the real binaries. argv[0] decides which agent to launch:
+#   /usr/local/bin/claude → reads image[claude] from config
+#   /usr/local/bin/codex  → reads image[codex]  from config
+#
+# Reference: docs/containerizing-gascity-for-local-use-spec.md §3.2, §4.
+
+set -euo pipefail
+
+CONFIG="${GC_DOCKER_RUNNER_CONFIG:-$HOME/.config/gascity-docker-runner/config.toml}"
+LOG_DIR="${GC_DOCKER_RUNNER_LOG_DIR:-$HOME/.local/state/gascity-docker-runner/logs}"
+mkdir -p "$LOG_DIR"
+
+# --- Which agent are we standing in for? -----------------------------------
+AGENT_NAME="$(basename "$0")"
+case "$AGENT_NAME" in
+    claude|codex|gemini) ;;
+    *) echo "[gc-docker-runner] FATAL invoked under unsupported name: $AGENT_NAME (expected claude|codex|gemini)" >&2; exit 64 ;;
+esac
+
+# --- Parse the (intentionally tiny) TOML config ---------------------------
+# We only need a handful of keys; full TOML parsing in pure bash is overkill.
+# Sed picks the value for `key = "value"` lines under each [section].
+toml_get() {
+    local section="$1" key="$2"
+    awk -v s="$section" -v k="$key" '
+        $0 ~ "^\\["s"\\]" {in=1; next}
+        in && $0 ~ "^\\[" {in=0}
+        in && $0 ~ "^[[:space:]]*"k"[[:space:]]*=" {
+            sub("^[^=]*=[[:space:]]*\"?", ""); sub("\"?[[:space:]]*$", "");
+            print; exit
+        }
+    ' "$CONFIG" 2>/dev/null
+}
+
+if [ ! -f "$CONFIG" ]; then
+    echo "[gc-docker-runner] FATAL no config at $CONFIG (run install.sh first)" >&2
+    exit 64
+fi
+
+IMAGE="$(toml_get image "$AGENT_NAME")"
+if [ -z "$IMAGE" ]; then
+    echo "[gc-docker-runner] FATAL no image configured for agent '$AGENT_NAME' in $CONFIG" >&2
+    exit 64
+fi
+
+LIM_MEM="$(toml_get limits memory)"; : "${LIM_MEM:=4g}"
+LIM_CPU="$(toml_get limits cpus)";   : "${LIM_CPU:=2}"
+LIM_PIDS="$(toml_get limits pids_limit)"; : "${LIM_PIDS:=512}"
+TIMEOUT="$(toml_get limits timeout)"; : "${TIMEOUT:=30m}"
+
+NETWORK="$(toml_get network mode)"; : "${NETWORK:=bridge}"
+
+# --- Resolve the rig path --------------------------------------------------
+# Gas City exports GC_RIG_PATH for runtime providers. If it's missing (e.g.
+# the supervisor invoked the shim without proper env), we refuse to mount
+# anything — the alternative is mounting $PWD which could be the user's
+# home directory.
+RIG_PATH="${GC_RIG_PATH:-}"
+if [ -z "$RIG_PATH" ]; then
+    echo "[gc-docker-runner] FATAL GC_RIG_PATH is empty — refusing to start without a scoped worktree" >&2
+    exit 64
+fi
+if [ ! -d "$RIG_PATH" ]; then
+    echo "[gc-docker-runner] FATAL GC_RIG_PATH does not exist or is not a directory: $RIG_PATH" >&2
+    exit 64
+fi
+
+# --- Container name --------------------------------------------------------
+SAFE_AGENT="${GC_AGENT_NAME:-anon}"
+SAFE_BEAD="${GC_BEAD_ID:-nobead}"
+NAME="gc-${SAFE_AGENT//[^a-zA-Z0-9_.-]/_}-${SAFE_BEAD//[^a-zA-Z0-9_.-]/_}"
+LOG_FILE="$LOG_DIR/${GC_SESSION_ID:-$$}.log"
+
+# --- Forwarded env (whitelist) --------------------------------------------
+# Only forward what the agent + supervisor need. Everything else is dropped.
+FORWARD_ENV=(
+    GC_RIG_PREFIX
+    GC_BEAD_ID
+    GC_AGENT_NAME
+    GC_SESSION_ID
+    GC_GIT_USER
+    GC_GIT_EMAIL
+    GH_TOKEN
+    ANTHROPIC_API_KEY
+    OPENAI_API_KEY
+    GOOGLE_API_KEY
+    CLAUDE_API_KEY
+)
+ENV_FLAGS=()
+for v in "${FORWARD_ENV[@]}"; do
+    if [ -n "${!v:-}" ]; then
+        ENV_FLAGS+=( -e "$v" )
+    fi
+done
+
+# --- docker run ------------------------------------------------------------
+# Every flag here has a reason. See spec §4 before stripping anything.
+exec_docker() {
+    docker run \
+        --rm \
+        --name "$NAME" \
+        --user 1000:1000 \
+        --read-only \
+        --tmpfs "/tmp:size=512m,mode=1777" \
+        --tmpfs "/home/agent/.cache:size=512m" \
+        --workdir /work \
+        -v "$RIG_PATH:/work:rw,Z" \
+        --network "$NETWORK" \
+        --memory="$LIM_MEM" \
+        --cpus="$LIM_CPU" \
+        --pids-limit="$LIM_PIDS" \
+        --cap-drop=ALL \
+        --security-opt=no-new-privileges \
+        --security-opt=seccomp=default \
+        "${ENV_FLAGS[@]}" \
+        --interactive \
+        $( [ -t 0 ] && echo --tty ) \
+        "$IMAGE" \
+        "$AGENT_NAME" "$@"
+}
+
+# --- Signal forwarding -----------------------------------------------------
+# Trap SIGTERM/SIGINT, ask docker to stop the container with a 10s grace,
+# then exit. Without this, `gc stop` would TERM the shim but leave the
+# container running until the agent process exits naturally.
+cleanup() {
+    docker stop --time=10 "$NAME" 2>/dev/null || true
+}
+trap cleanup TERM INT
+
+# --- Run with timeout + tee logs ------------------------------------------
+{
+    echo "[gc-docker-runner] $(date -u +%FT%TZ) launch agent=$AGENT_NAME bead=${GC_BEAD_ID:-?} session=${GC_SESSION_ID:-?} image=$IMAGE"
+    echo "[gc-docker-runner] rig=$RIG_PATH name=$NAME timeout=$TIMEOUT"
+} >> "$LOG_FILE"
+
+# Convert "30m" / "2h" / "90s" into a seconds count for `timeout`.
+parse_dur() {
+    local d="$1" n="${1%[smhd]}" u="${1: -1}"
+    case "$u" in
+        s) echo "$n" ;;
+        m) echo $((n * 60)) ;;
+        h) echo $((n * 3600)) ;;
+        d) echo $((n * 86400)) ;;
+        *) echo "$d" ;;
+    esac
+}
+TIMEOUT_SECS="$(parse_dur "$TIMEOUT")"
+
+if command -v timeout >/dev/null 2>&1; then
+    timeout --signal=TERM --kill-after=15s "$TIMEOUT_SECS" \
+        bash -c 'exec_docker "$@"' bash "$@" 2>&1 | tee -a "$LOG_FILE"
+else
+    # macOS: GNU timeout is `gtimeout` from coreutils; if missing we run
+    # without a hard timeout and rely on the agent to terminate.
+    exec_docker "$@" 2>&1 | tee -a "$LOG_FILE"
+fi
+RC=${PIPESTATUS[0]}
+
+echo "[gc-docker-runner] $(date -u +%FT%TZ) exit rc=$RC" >> "$LOG_FILE"
+exit "$RC"

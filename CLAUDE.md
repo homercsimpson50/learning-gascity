@@ -7,37 +7,48 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 This repo is a **harness** for upstream
 [gastownhall/gascity](https://github.com/gastownhall/gascity). Gas City source
 lives upstream — never vendored here. There is no Go/Python/JS code to lint
-or test. Two ways to run it, side by side:
+or test. Two ways to run gascity, side by side:
 
-- **`containerized/`** — Docker setup. The Dockerfile clones gascity at a
-  pinned ref and compiles `gc` in-image. Used when you want gascity isolated
-  from your host (corporate laptop, untrusted agents, repeatable builds).
+- **`containerized/`** — implements **Option A** from
+  [`docs/containerizing-gascity-for-local-use-spec.md`](docs/containerizing-gascity-for-local-use-spec.md).
+  `gc` runs natively on the host; only **agent invocations** (`claude`,
+  `codex`, `gemini`) are wrapped in scoped Docker containers via a host-side
+  shim (`gc-docker-runner`) symlinked as `claude` on PATH. Use this when
+  you want gascity native but agents sandboxed (corporate laptop, untrusted
+  agents, machines with cloud creds in env).
 - **`scripts/`** — local launcher. The `gascity-workspace.{sh,py}` scripts
   open an iTerm2 layout against a **local** city at `~/gc`, mirroring the
-  layout used for gastown at `~/gt`. Used when you want gascity native on the
-  host.
+  layout used for gastown at `~/gt`. Use this when you want gascity native
+  on the host *with no agent isolation* (personal/throwaway machine).
+
+The previous all-in-one Dockerfile that put `gc` itself inside a container
+has been removed. If you see references to `docker compose up -d` against
+the gascity service, those are stale — Option A does not run `gc` in Docker.
 
 When the user asks to "fix gascity behavior X," check whether X lives in this
-harness (Dockerfile/compose, entrypoint, workspace script) or upstream (the
-`gc` CLI itself, formulas, beads, runtime providers). Upstream fixes need a
-`GASCITY_REF` bump in `.env` for the container, or a `gc` binary upgrade for
-the local install — not edits here.
+harness (shim, agent image entrypoint, install script, workspace script) or
+upstream (the `gc` CLI itself, formulas, beads, runtime providers). Upstream
+fixes need a `gc` binary upgrade — not edits here.
 
 ## Common commands
 
-### Containerized (`containerized/`)
+### Containerized (Option A — `containerized/`)
 
 ```bash
-./start.sh              # build (if needed), bring up, smoke test
-./start.sh --rebuild    # force --no-cache rebuild
-./start.sh --shell      # bring up + drop into shell
-./start.sh --down       # stop, preserve volumes
-./start.sh --wipe       # stop + delete all volumes (full reset, prompts to confirm)
+./install.sh                # build agent image, install shim, set up symlinks, drop default config
+./install.sh --no-build     # re-install shim/symlinks/config without re-building the image
+./install.sh --uninstall    # remove shim + symlinks (image and config preserved)
+./verify.sh                 # run the seven isolation probes from spec §8
 
-docker compose exec gascity bash                    # shell into running container
-docker compose exec gascity gc version              # smoke test
-docker compose exec gascity bash -c 'cd /city && gc doctor'   # health check (warnings OK)
-docker compose logs -f gascity                      # tail logs
+# After install, on the host:
+gc init ~/my-city
+gc rig add ~/code/some-repo
+gc start
+# Agents spawned by the supervisor run inside containers transparently —
+# nothing about the gc CLI changes.
+
+# Inspect a specific session's container logs (teed by the shim):
+ls ~/.local/state/gascity-docker-runner/logs/
 ```
 
 ### Local (`~/gc` city, `scripts/`)
@@ -55,8 +66,8 @@ cd ~/gc && ../code/learning-gascity/scripts/gc-feed-ai     # same stream + perio
 gc supervisor status                  # is the machine-wide supervisor up?
 ```
 
-There are no unit tests. Validation is: `start.sh` (or the local supervisor)
-runs clean, `gc version` returns, `gc doctor` reports no errors (warnings OK).
+There are no unit tests. Validation is `containerized/verify.sh` for
+Option A and (manually) `gc doctor` reporting clean for the local install.
 
 ## Architecture
 
@@ -65,10 +76,10 @@ runs clean, `gc version` returns, `gc doctor` reports no errors (warnings OK).
 The local setup mirrors the gastown convention (`~/gt`):
 
 - `~/gc/` — the **city directory**. Created by `gc init --provider claude .`
-  (note: local `gc` v1.0.1 names the provider `claude`, not `claude-code`
-  like the container default). Contains `city.toml`, `pack.toml`, `.gc/`
-  runtime, `.beads/` dolt-backed bead store, and the `agents/`, `formulas/`,
-  `orders/`, `overlays/` subdirs.
+  (note: local `gc` v1.0.1 names the provider `claude`, not `claude-code`).
+  Contains `city.toml`, `pack.toml`, `.gc/` runtime, `.beads/` dolt-backed
+  bead store, and the `agents/`, `formulas/`, `orders/`, `overlays/`
+  subdirs.
 - `~/.gc/` — the **machine-wide supervisor state**: `cities.toml` (registry
   of all local cities), `supervisor.log`, `supervisor.lock`, `events.jsonl`.
   Don't confuse this with `~/gc/.gc/` — the latter is the city's own runtime.
@@ -84,7 +95,6 @@ non-interactively scaffold + register + bring up the city in one shot.
 session`, which surfaces as the supervisor's mayor session staying in
 `reserved-unmaterialized`. Fix: re-run the `bd` install script
 (`curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash`).
-This had to be done once on this host.
 
 ### iTerm2 workspace layout (`scripts/gascity-workspace.{sh,py}`)
 
@@ -124,76 +134,86 @@ formatting only — sanity-checks the JSON parse without burning Ollama).
 This is **pure wrapper code** — no upstream gascity binaries are touched
 or rebuilt. It works against any `gc events --follow` output.
 
-### Two-stage Docker build (`containerized/Dockerfile`)
+### Option A architecture (`containerized/`)
 
-1. **`builder`** (`golang:1.25-bookworm`): `git clone` of `${GASCITY_REPO}` at
-   `${GASCITY_REF}`, then `make build`. Produces just the `gc` binary.
-2. **`runtime`** (`docker/sandbox-templates:claude-code` base): installs
-   gascity's runtime deps (`tmux`, `jq`, `procps`, `lsof`, `util-linux`,
-   `dbus` + `gnome-keyring` + `libsecret-1-0`), plus `bd` and `dolt` for the
-   default beads provider. The `gc` binary is `COPY --from=builder`ed in.
+The design doc is [`docs/containerizing-gascity-for-local-use-spec.md`](docs/containerizing-gascity-for-local-use-spec.md).
+This implementation is the v1 shell-shim version described in §3.
 
-The `GASCITY_REPO` / `GASCITY_REF` build args are forwarded from `.env` by
-`docker-compose.yml`. To rebuild against a different upstream version, edit
-`.env` and re-run `./start.sh --rebuild`.
+#### Components
 
-### Container CMD: `gc supervisor run`, not `gc start`
+```
+containerized/
+├── agent-runner/
+│   ├── Dockerfile          debian-slim + claude CLI + entrypoint
+│   └── entrypoint.sh       validates env contract, drops to agent user, execs CLI
+├── shim/
+│   ├── gc-docker-runner    bash; reads argv[0] to pick agent, builds docker run, forwards stdio + signals
+│   └── config.example.toml image map, network mode, limits
+├── install.sh              build image + install shim + symlink claude → shim + drop default config
+└── verify.sh               7 isolation probes from spec §8
+```
 
-On a host, `gc start` registers a launchd/systemd service. Inside a container
-that is itself a single managed process, that's pointless — so the container's
-`CMD` is the foreground equivalent, `gc supervisor run`. Don't change this to
-`gc start`.
+#### How an agent invocation flows
 
-### Entrypoint flow (`containerized/docker-entrypoint.sh`)
+1. `gc-supervisor` decides to spawn an agent for a bead.
+2. It execs `claude <args>` with `GC_RIG_PATH`, `GC_BEAD_ID`, `GC_AGENT_NAME`,
+   `GC_SESSION_ID` exported.
+3. PATH lookup hits `~/.local/bin/gascity-shims/claude` first
+   (a symlink to `gc-docker-runner`).
+4. The shim:
+   - Reads `~/.config/gascity-docker-runner/config.toml` for the image
+     mapping, network mode, and limits.
+   - Builds a `docker run` with `/work` bind-mounted to `GC_RIG_PATH`,
+     `--read-only` rootfs, tmpfs for `/tmp` + `~/.cache`, `--user 1000:1000`,
+     `--cap-drop ALL`, `--security-opt no-new-privileges`, `--memory`,
+     `--cpus`, `--pids-limit`, and only the whitelisted env vars
+     (model API keys + `GC_*` + `GH_TOKEN`).
+   - Forwards stdio + SIGTERM/SIGINT to the container.
+   - Tees the session to
+     `~/.local/state/gascity-docker-runner/logs/<session-id>.log`.
+   - Exits with the container's exit code.
 
-Runs on every container start, in this order:
+#### Hard rules (do not relax without reading the spec §4)
 
-1. Apply `GIT_USER` / `GIT_EMAIL` to git + dolt config (idempotent).
-2. Launch D-Bus + GNOME Keyring so Claude Code's libsecret-backed credential
-   storage works on Linux (otherwise it re-prompts every boot).
-3. **Sync host `~/.claude` → container `~/.claude`**: the host config is
-   bind-mounted **read-only** at `/home/agent/.claude-host`; the entrypoint
-   copies just `settings.json`, `settings.local.json`, `.credentials.json`,
-   and the `projects/` dir into the writable `claude-data` volume. The
-   read-only/writable split is deliberate — agents inherit your auth without
-   getting write access to host config.
-4. Same pattern for `~/.config/gh/hosts.yml` so agents can `git push`.
-5. **First-run only**: `gc init --provider $GC_PROVIDER /city` to materialize
-   the city scaffold. Subsequent starts skip this.
-6. `exec` the CMD.
+- **Never** mount `$HOME`, `~/.aws`, `~/.ssh`, `~/.config` (other than
+  what's explicitly in the env whitelist).
+- **Never** mount `/var/run/docker.sock`. Docker-in-Docker = root on host.
+- **Never** add `--privileged`, `--cap-add`, `--device`, `--pid=host`,
+  `--net=host`, `--ipc=host`.
+- **Never** drop `--cap-drop=ALL` or `--security-opt=no-new-privileges`.
+- **Never** drop `--user 1000:1000` (running as root in the container is
+  one container-escape away from root on host).
+- **Never** drop the rootfs `--read-only` flag — agents must write to
+  `/work` (the rig) or tmpfs (`/tmp`, `~/.cache`).
 
-### Volume layout (`containerized/docker-compose.yml`)
+If a probe in `verify.sh` fails after a change here, that's a security
+regression — fix the change, not the test.
 
-| Volume | Mount | Why |
-|---|---|---|
-| `city-workspace` | `/city` | City scaffold (`city.toml`, `.gc/`, formulas). |
-| `dolt-data` | `/city/.dolt-data` | **Must be a Docker volume, never a bind mount on macOS.** VirtioFS fsync semantics corrupt the dolt journal. |
-| `claude-data`, `claude-state`, `claude-share` | `/home/agent/.claude{,-state,-share}` | Claude Code credentials, runtime state, shared assets. |
-| bind rw | `${GCC_CODE_DIR:-~/code}` → `/city/rigs-host` | Host code; rigs added from subdirs here. |
-| bind ro | `~/.claude` → `/home/agent/.claude-host` | Read-only staging; entrypoint syncs into writable volume. |
-| bind ro | `~/.config/gh` → `/home/agent/.config/gh-host` | Same pattern for `gh` CLI. |
+#### v1 limitations (tracked for v2)
 
-### Security posture
-
-- `cap_drop: [ALL]` plus only `CHOWN`, `SETUID`, `SETGID` (needed for keyring
-  + process bookkeeping).
-- `no-new-privileges:true`, `pids: 512`, `memory: 4G`, `cpus: 4`.
-- Host SSH keys, AWS creds, browser profiles, and the rest of `~/.config` are
-  **deliberately not mounted**. Don't add them — the whole point of the
-  container is that gascity agents run with `--dangerously-skip-permissions`
-  and need to be physically blocked from reading host secrets.
-- `IS_SANDBOX=1` is set so Claude Code knows it's sandboxed.
+- No egress allowlist — uses Docker's default bridge with full internet
+  reachability. Spec §6 outlines a dnsmasq + iptables approach.
+- No GitHub App token minting — `GH_TOKEN` is forwarded as-is from the
+  host environment if set. Spec §5 calls for fresh per-session tokens.
+- No per-rig override TOML (`.gc-runner.toml` in the rig root) yet.
+- One image per agent (`claude` only by default). Building `codex` /
+  `gemini` images is one Dockerfile each under `agent-runner/`.
 
 ## When editing
 
-- Changes to `Dockerfile`, `docker-entrypoint.sh`, or installed packages
-  require `./start.sh --rebuild` to take effect.
-- Changes to `docker-compose.yml` (volumes, env, caps) take effect on the next
-  `docker compose up -d` — no rebuild needed.
-- Adding host directories to mounts: weigh against the security posture above.
-  If a host file is needed, prefer the read-only-staging-plus-entrypoint-copy
-  pattern already used for `~/.claude` and `~/.config/gh`, not a direct
-  read-write mount.
-- `gc doctor` exits non-zero on warnings — `start.sh` already tolerates this
-  (`set +e` around the smoke test). Don't "fix" the smoke test by suppressing
-  exit codes elsewhere.
+- Changes to `containerized/agent-runner/` require `./install.sh` (or
+  `./install.sh --no-symlink` if you've already wired the symlink) to
+  rebuild the image.
+- Changes to `containerized/shim/gc-docker-runner` take effect on the next
+  agent invocation — re-run `./install.sh --no-build` to copy the updated
+  shim into `~/.local/bin/gascity-shims/`.
+- Changes to `containerized/shim/config.example.toml` do **not**
+  automatically propagate — `install.sh` only writes the user's config
+  on first run. Edit `~/.config/gascity-docker-runner/config.toml`
+  directly when iterating, then update the example for new installs.
+- Adding host directories to the shim's `docker run` flags: weigh against
+  the hard rules above. If genuinely needed, the secrets contract (env
+  forward, no filesystem mount) is the right pattern — extend
+  `FORWARD_ENV` in the shim, don't add a new `-v`.
+- After any change to `containerized/`, run `./verify.sh`. The seven
+  probes are the contract.

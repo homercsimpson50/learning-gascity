@@ -1,18 +1,25 @@
 # Learning Gas City
 
-A clean, gascity-only setup. Run [Gas City](https://github.com/gastownhall/gascity) —
-the orchestration-builder SDK for multi-agent coding workflows — in a
-sandboxed Docker container, with no Gas Town legacy and nothing else
-mixed in.
+A harness for [Gas City](https://github.com/gastownhall/gascity) — Steve
+Yegge's orchestration-builder SDK for multi-agent coding workflows. Two
+ways to run it on this machine, plus the spec and chronicle that explain
+why this repo is shaped the way it is.
 
 ```
 learning-gascity/
-└── containerized/         ← Docker build context. One command brings it up.
-    ├── Dockerfile
-    ├── docker-compose.yml
-    ├── docker-entrypoint.sh
-    ├── .env.example
-    └── README.md
+├── README.md                                            ← you are here
+├── containerized/                                       ← Option A: host gc + agents in scoped containers
+│   ├── agent-runner/   (image: minimal Debian + claude CLI)
+│   ├── shim/           (gc-docker-runner — wraps `claude` → `docker run`)
+│   ├── install.sh
+│   └── verify.sh
+├── scripts/                                             ← local launcher
+│   ├── gascity-workspace.sh / .py   (4-pane iTerm2 layout against ~/gc)
+│   ├── gascity-start.sh / -stop.sh  (city lifecycle helpers)
+│   └── gc-feed-ai                   (streams events with periodic Ollama summary)
+├── docs/
+│   └── containerizing-gascity-for-local-use-spec.md     ← the spec containerized/ implements
+└── CLAUDE.md
 ```
 
 ---
@@ -21,75 +28,83 @@ learning-gascity/
 
 > *Orchestration-builder SDK for multi-agent coding workflows.*
 
-Gas City is the SDK underneath Gas Town. Same primitives — runtime
+Gas City is the SDK underneath Gas Town: same primitives — runtime
 providers, beads-backed work tracking, formulas, molecules, mail,
 refinery-style merge gates, controller/supervisor reconciliation — but
-exposed as a configurable toolkit instead of a fixed end-product.
+exposed as a configurable toolkit instead of a fixed end-product. CLI is
+`gc`, not `gt`.
 
-Compared to Gas Town, Gas City gives you:
+What Gas City adds over Gas Town:
 
-- **A declarative `city.toml`** for shape, not the implicit "Town is what
+- **Declarative `city.toml`** for shape, instead of "the Town is what
   `gt install` made."
-- **Multiple runtime providers** out of the box: tmux, subprocess, exec,
-  ACP, and **Kubernetes**. Same orchestration code, different substrate.
-- **Packs and overlays** for sharing config across cities (one
-  "carparts" pack imported into multiple cities, for instance).
-- **An explicit controller / supervisor reconciliation loop** —
+- **Multiple runtime providers**: tmux, subprocess, exec, ACP, **Kubernetes**.
+  Same orchestration code, different substrate.
+- **Packs and overlays** for sharing config across cities.
+- **Explicit controller/supervisor reconciliation loop** —
   Kubernetes-style desired-vs-actual instead of implicit-via-daemons.
-- **A machine-wide supervisor** that can manage multiple cities on the
-  same host from one process.
-
-The CLI is `gc`, not `gt`.
+- **Machine-wide supervisor** that manages multiple cities on the same
+  host from one process.
 
 ---
 
-## Quick start
+## Two ways to run it
+
+### 1. `containerized/` — Option A: scoped agent containers
+
+The serious-laptop / work-machine path. Gas City's `gc` and supervisor
+run normally on the host (no virtualization overhead, native logs,
+launchd integration), but **every agent invocation is wrapped in a
+Docker container** scoped to a single rig worktree. No host SSH keys,
+AWS creds, or `~/.config` are reachable from inside.
+
+The implementation follows
+[`docs/containerizing-gascity-for-local-use-spec.md`](docs/containerizing-gascity-for-local-use-spec.md):
+a small **`gc-docker-runner` shim** stands in for `claude`/`codex`/`gemini`
+on `PATH` and translates each agent invocation into a hardened
+`docker run` against `gascity-agent-runner:<agent>`.
 
 ```bash
 cd containerized/
-cp .env.example .env
-# edit .env so GIT_USER / GIT_EMAIL aren't "TestUser"
-
-docker compose up -d --build
-docker compose exec gascity gc version
-docker compose exec gascity gc doctor
+./install.sh                      # build agent image, install shim, set up symlinks, drop default config
+export PATH="$HOME/.local/bin/gascity-shims:$PATH"   # then add to your shell rc
+./verify.sh                       # 7 isolation probes from the spec §8
+gc init ~/my-city && cd ~/my-city
+gc rig add ~/code/some-repo && bd create "do a thing" && gc start
 ```
 
-Then add your code as a rig and start working — full walkthrough in
-[`containerized/README.md`](containerized/README.md).
+Full guide: [`containerized/README.md`](containerized/README.md).
+
+### 2. `scripts/` — local install, no isolation
+
+The personal-laptop path. `gc` runs natively, agents run as host
+subprocesses (full host access — fine on a throwaway machine). Comes
+with a 4-pane iTerm2 workspace layout against `~/gc` modeled after
+the gastown layout at `~/gt`.
+
+```bash
+./scripts/gascity-workspace.sh      # opens iTerm2 layout
+./scripts/gascity-workspace.sh --ai # same, but feed pane uses Ollama summary
+```
 
 ---
 
-## Why containerize?
+## Why two paths?
 
-Gas City agents run with `--dangerously-skip-permissions`. On a personal
-laptop, that's fine. On a work machine with corporate VPN, SSH keys, AWS
-credentials, browser profiles, and sensitive repos, one rogue agent is
-one rogue agent too many. The container locks agents into `/city`
-(workspace) and `/city/rigs-host` (your code) and physically blocks
-their view of the rest of your home directory.
+Different threat models. Containerized is for machines where one rogue
+agent is one rogue agent too many — work laptops, machines with cloud
+credentials in the env, anything with shared SSH access. Local is for a
+machine you'd anyway hand a stranger a shell on.
 
----
-
-## How it differs from "vendor the gascity repo"
-
-The Dockerfile is a **multi-stage build** — stage 1 clones the gascity
-repo at a pinned ref and compiles `gc`; stage 2 is the runtime image
-with just the binary plus deps. You get:
-
-- One command (`docker compose up --build`) handles everything; no need
-  to clone gascity yourself.
-- The image is reproducible from a SHA pin in `.env`
-  (`GASCITY_REF=<sha>`), not from "whatever's in your local checkout."
-- The runtime image is small — Go toolchain stays in the builder stage.
+Same upstream, same `gc` CLI, same beads — the only difference is
+whether agent invocations go through a `docker run` boundary.
 
 ---
 
 ## Pointers
 
-- [`containerized/README.md`](containerized/README.md) — full guide:
-  build, bring up, add rigs, volumes, security, troubleshooting.
-- [Upstream gascity README](https://github.com/gastownhall/gascity) —
-  what `gc` actually does once you're inside the container.
-- [Gas City "Coming from Gas Town?"](https://github.com/gastownhall/gascity/blob/main/docs/getting-started/coming-from-gastown.md)
-  — the doc whose existence tells you what audience this is for.
+- [`docs/containerizing-gascity-for-local-use-spec.md`](docs/containerizing-gascity-for-local-use-spec.md) — the design doc that drives `containerized/`.
+- [`containerized/README.md`](containerized/README.md) — full operational guide for Option A.
+- [`CLAUDE.md`](CLAUDE.md) — guidance for Claude Code when working in this repo.
+- Upstream Gas City: <https://github.com/gastownhall/gascity>.
+- Sibling repo for Gas Town: <https://github.com/homercsimpson50/learning-gastown>.

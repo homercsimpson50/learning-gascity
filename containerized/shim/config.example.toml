@@ -1,0 +1,31 @@
+# gc-docker-runner config.
+#
+# Lives at ~/.config/gascity-docker-runner/config.toml (or wherever
+# GC_DOCKER_RUNNER_CONFIG points). Copy this file there and edit.
+#
+# Reference: docs/containerizing-gascity-for-local-use-spec.md §3.2.
+
+[image]
+# Pin to a digest for reproducibility once you push to a registry.
+# For local dev, the install.sh script builds gascity-agent-runner:claude
+# from agent-runner/ and you can leave the value as-is.
+claude = "gascity-agent-runner:claude"
+# Add codex / gemini lines here when you build their images.
+# codex  = "gascity-agent-runner:codex"
+# gemini = "gascity-agent-runner:gemini"
+
+[network]
+# v1: "bridge" uses Docker's default bridge with no allowlist enforcement.
+# This is acceptable for accidental-footgun protection but is NOT a hard
+# isolation boundary against a determined model. For a stricter posture,
+# stand up a custom network + DNS allowlist (see §6 of the spec) and
+# change this to that network's name.
+mode = "bridge"
+
+[limits]
+# Hard caps on the agent container. Tune if you see OOMs on real work.
+memory     = "4g"
+cpus       = "2"
+pids_limit = 512
+# Hard kill the container after this duration. Use s/m/h/d suffix.
+timeout    = "30m"

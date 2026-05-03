@@ -14,9 +14,14 @@
 #      hygiene as gtc feed --ai.
 #
 # Usage:
-#   ./gc-feed-ai                # run against local city (cwd or --city)
-#   ./gc-feed-ai --city ~/gc    # explicit city
-#   ./gc-feed-ai --no-ai        # plain pass-through (skip Ollama, sanity test)
+#   ./gc-feed-ai                # rich TUI: panes for sessions / beads /
+#                                 events / AI summary, scrollable, with
+#                                 keybindings (q quit, s toggle AI, r refresh,
+#                                 a force-summarize-now). Requires textual.
+#   ./gc-feed-ai --simple       # old streaming mode: stdlib-only,
+#                                 pretty-prints events + periodic summary
+#                                 block. Use this if textual isn't installed.
+#   ./gc-feed-ai --no-ai        # skip Ollama (sanity-check JSON parsing).
 #
 # Config:
 #   ~/.gc-feed-ai.conf  sourced if present. Set any of the env knobs
@@ -67,13 +72,24 @@ die() { echo "${RED}Error:${NC} $*" >&2; exit 1; }
 
 # -------- arg parse --------
 NO_AI=0
+SIMPLE=0
 PASSTHROUGH=()
 for arg in "$@"; do
     case "$arg" in
-        --no-ai) NO_AI=1 ;;
-        *)       PASSTHROUGH+=("$arg") ;;
+        --no-ai)  NO_AI=1 ;;
+        --simple) SIMPLE=1 ;;
+        *)        PASSTHROUGH+=("$arg") ;;
     esac
 done
+
+# Decide TUI vs streaming mode. TUI is default if textual is importable.
+if [ "$SIMPLE" -eq 0 ]; then
+    if ! python3 -c "import textual" >/dev/null 2>&1; then
+        echo "  ${YELLOW}!${NC} textual not installed — falling back to --simple"
+        echo "    install for full TUI: pip3 install --user textual"
+        SIMPLE=1
+    fi
+fi
 
 # -------- Ollama setup (only if AI on) --------
 ensure_ollama() {
@@ -129,13 +145,19 @@ if [ "$NO_AI" -eq 0 ]; then
     fi
 fi
 
-# -------- pipe gc events --follow → summarizer --------
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SUMMARIZER="$SCRIPT_DIR/_gc_feed_ai.py"
+# -------- launch TUI or streaming mode --------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 export GC_FEED_AI_MODEL="$MODEL"
 export OLLAMA_URL="$OLLAMA_URL"
 export GC_FEED_AI_DISABLE="$NO_AI"
 export GC_FEED_AI_EVERY
 export GC_FEED_AI_INTERVAL
-exec gc events --follow ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"} | "$SUMMARIZER"
+export GC_CITY="${GC_CITY:-$PWD}"
+
+if [ "$SIMPLE" -eq 1 ]; then
+    SUMMARIZER="$SCRIPT_DIR/_gc_feed_ai.py"
+    exec gc events --follow ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"} | "$SUMMARIZER"
+else
+    exec python3 "$SCRIPT_DIR/_gc_feed_tui.py"
+fi
