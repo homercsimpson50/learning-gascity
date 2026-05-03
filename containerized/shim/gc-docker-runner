@@ -26,11 +26,13 @@ esac
 # We only need a handful of keys; full TOML parsing in pure bash is overkill.
 # Sed picks the value for `key = "value"` lines under each [section].
 toml_get() {
+    # NOTE: BSD awk on macOS reserves `in` as a keyword (array operator).
+    # Don't use `in` as a variable — `inside` works in both BSD and GNU awk.
     local section="$1" key="$2"
     awk -v s="$section" -v k="$key" '
-        $0 ~ "^\\["s"\\]" {in=1; next}
-        in && $0 ~ "^\\[" {in=0}
-        in && $0 ~ "^[[:space:]]*"k"[[:space:]]*=" {
+        $0 ~ "^\\["s"\\]" {inside=1; next}
+        inside && $0 ~ "^\\[" {inside=0}
+        inside && $0 ~ "^[[:space:]]*"k"[[:space:]]*=" {
             sub("^[^=]*=[[:space:]]*\"?", ""); sub("\"?[[:space:]]*$", "");
             print; exit
         }

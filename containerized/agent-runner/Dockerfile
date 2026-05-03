@@ -13,11 +13,12 @@
 
 FROM debian:stable-slim
 
-ARG CLAUDE_INSTALL_URL=https://claude.ai/install
-
 # Runtime dependencies — Gas City rigs commonly need git, gh, jq, tmux
 # and curl for tool calls. ca-certificates is needed for HTTPS.
 # tini reaps zombies + handles signals so `docker stop` is clean.
+# nodejs + npm are needed because Claude Code is distributed as the
+# npm package @anthropic-ai/claude-code; the install.sh script at
+# claude.ai/install is Cloudflare-gated and isn't fetchable from CI.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     gh \
@@ -27,6 +28,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     tini \
     sudo \
+    gnupg \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
 # Non-root user. uid 1000 matches the typical first user on Linux hosts so
@@ -40,16 +44,13 @@ RUN groupadd --gid 1000 agent \
 # tmpfs-mounted by the shim so the rootfs can stay --read-only.
 RUN mkdir -p /work && chown agent:agent /work
 
-# Install Claude Code as the agent user so its config + version cache live
-# under /home/agent. The official installer drops the binary into
-# ~/.local/bin/claude. We then symlink to /usr/local/bin so PATH lookups
-# work even if /home/agent gets a tmpfs mount over .local/bin (it doesn't,
-# but defence in depth).
-USER agent
-RUN curl -fsSL "$CLAUDE_INSTALL_URL" | bash || \
-    (echo "claude install failed — verify $CLAUDE_INSTALL_URL is reachable from your build network"; exit 1)
-USER root
-RUN ln -sf /home/agent/.local/bin/claude /usr/local/bin/claude
+# Install Claude Code globally via npm. The official npm package name is
+# @anthropic-ai/claude-code and it ships a `claude` bin shim. Install as
+# root so it lands on a system PATH (/usr/bin/claude); agent runs claude
+# read-only.
+ARG CLAUDE_VERSION=latest
+RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_VERSION}" \
+    && claude --version
 
 # Entrypoint validates the env contract from the shim, drops to agent, and
 # execs the CLI. Kept in its own file (not a heredoc) for grep-ability.
