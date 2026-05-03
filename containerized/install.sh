@@ -129,9 +129,11 @@ chmod +x "$WRAPPER_BIN"
 ok "Wrapper installed at $WRAPPER_BIN"
 
 # ---------------------------------------------------------------------------
-# 6b. Symlink the docker workspace + start/stop scripts into ~/.local/bin/
-#     so they're directly invokable as gc-workspace.sh, gc-docker-start.sh,
-#     and gc-docker-stop.sh from any shell.
+# 6b. Symlink workspace launchers + start/stop scripts into ~/.local/bin/
+#     so they're directly invokable from any shell:
+#       gc-workspace-home.sh / gc-workspace-work.sh   (mode-swap wrappers)
+#       gc-docker-start.sh   / gc-docker-stop.sh      (supervisor-only swap)
+#       gc-workspace-home.py / gc-workspace-work.py   (Python API variants)
 # ---------------------------------------------------------------------------
 SCRIPTS_DIR="$(cd "$(dirname "$0")/../scripts" && pwd)"
 mkdir -p "$HOME/.local/bin"

@@ -21,10 +21,11 @@ instead.
 
 ## Prereqs
 
-Two things, both one-time:
+Three things, all one-time:
 
 1. **Git** — `xcode-select --install` on macOS gives you Git + the rest of CLT.
 2. **A working Claude Code login** on the host — `claude --version` should print, and `claude auth login` should be done.
+3. **iTerm2** — <https://iterm2.com>. The workspace launcher is iTerm2-only (uses AppleScript or its Python API).
 
 That's it. No Docker, no Homebrew yet (we'll install Brew if it's missing).
 
@@ -93,25 +94,30 @@ gc session attach mayor # talk to the mayor (Ctrl-b d to detach)
 
 ### iTerm2 workspace
 
+If you've ever installed the work-machine flow on this same laptop,
+you already have the explicit wrapper at `~/.local/bin/`:
+
 ```bash
-~/code/learning-gascity/scripts/gascity-workspace.sh
+gc-workspace-home.sh         # ↻ swap to local supervisor + open home iTerm2 layout
+gc-workspace-home.sh --ai    # same, with Ollama summary feed in the bottom pane
 ```
 
-Opens a 4-pane layout:
-- **Left** — mayor session (`gc session attach mayor`).
-- **Top right** — interactive shell.
-- **Bottom right** — live event stream (`gc events --follow`).
-
-Add `--ai` to run the bottom-right pane through `gc-feed-ai`, which
-adds a periodic Ollama summary on top of the raw event stream:
+If you only ever use the local flow, the underlying script works too —
+it does the same thing minus the supervisor swap:
 
 ```bash
+~/code/learning-gascity/scripts/gascity-workspace.sh
 ~/code/learning-gascity/scripts/gascity-workspace.sh --ai
 ```
 
-`gc-feed-ai` auto-starts Ollama with `qwen2.5:3b`, summarizes every 8
-events / 15 seconds, and stops Ollama on exit so you don't lose RAM
-to it overnight.
+Opens a 3-pane layout:
+- **Left tall** — mayor session (`gc session attach mayor`).
+- **Top right** — interactive shell.
+- **Bottom right** — live event stream (`gc events --follow`).
+
+`gc-feed-ai` (with `--ai`) auto-starts Ollama with `qwen2.5:3b`,
+summarizes every 8 events / 15 seconds, and stops Ollama on exit so
+you don't lose RAM to it overnight.
 
 ### Bare commands (no workspace)
 

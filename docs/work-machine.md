@@ -25,10 +25,11 @@ access to, use [`personal-laptop.md`](personal-laptop.md) instead.
 
 ## Prereqs
 
-Two things, both one-time:
+Three things, all one-time:
 
 1. **Git** — `xcode-select --install` on macOS gives you Git + the rest of CLT.
 2. **Docker Desktop** — <https://www.docker.com/products/docker-desktop>. Doesn't need to be running yet; `bootstrap.sh` will start it.
+3. **iTerm2** — <https://iterm2.com>. The workspace launcher is iTerm2-only (uses AppleScript or its Python API).
 
 That's it. Homebrew, gc, bd, dolt, flock are auto-installed.
 
@@ -80,21 +81,22 @@ grep learning-gascity ~/.zshrc || echo "(clean)"
 
 ## Daily use
 
-One command (`install.sh` symlinks the launcher to `~/.local/bin/`):
+One command (`install.sh` symlinks all of these into `~/.local/bin/`):
 
 ```bash
-gc-workspace.sh        # plain feed
-gc-workspace.sh --ai   # feed via Ollama summary
+gc-workspace-work.sh         # ↻ swap to docker supervisor + open desert iTerm2 layout
+gc-workspace-work.sh --raw   # same, but bottom pane is raw `gc events --follow`
+                              # (default is gc-feed-ai TUI — readable, with optional Ollama summary)
 ```
 
-Opens an iTerm2 window with three panes, all painted in a desert
-color scheme so you can't mistake it for the local workspace:
+Opens an iTerm2 window with three panes, all painted in a desert color
+scheme so you can't mistake it for the local workspace:
 
 | Pane | What it runs |
 |---|---|
-| Left tall | `gc-docker supervisor run` (foreground supervisor; agents spawn in containers) |
-| Top right | shell, cd'd to the city — type `gc session attach mayor`, `bd create "…"`, `gc-docker rig add …` here |
-| Bottom right | `gc events --follow` (or `gc-feed-ai` with `--ai`) |
+| Left tall | `gascity-docker-start.sh && gc session attach mayor` — auto-stops the local supervisor first if running, brings the shim-aware backgrounded supervisor up, then attaches you to mayor |
+| Top right | blank shell, cd'd to the city — type `bd create "…"`, `gc-docker rig add …`, etc. here |
+| Bottom right | `gc-feed-ai` (TUI by default) or `gc events --follow` (with `--raw`) |
 
 The first time you run it, the script auto-initializes a city at
 `$HOME/gc-docker` (override with `GC_DOCKER_CITY=…`). On subsequent

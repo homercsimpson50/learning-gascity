@@ -50,10 +50,14 @@ learning-gascity/
 │   ├── install.sh
 │   ├── uninstall.sh
 │   └── verify.sh       (7 isolation probes from the spec §8)
-├── scripts/                                          ← helpers used by the personal-laptop path
-│   ├── gascity-workspace.sh / .py
-│   ├── gascity-start.sh / -stop.sh
-│   └── gc-feed-ai
+├── scripts/                                          ← workspace launchers + lifecycle helpers
+│   ├── gascity-workspace-home.sh / .py     ← ↻ swap to local + open home iTerm2 layout
+│   ├── gascity-workspace-work.sh / .py     ← ↻ swap to docker + open desert iTerm2 layout
+│   ├── gascity-workspace.sh / .py          ← underlying local layout (no swap)
+│   ├── gascity-docker-workspace.sh / .py   ← underlying docker layout (no swap)
+│   ├── gascity-start.sh / -stop.sh         ← local supervisor lifecycle
+│   ├── gascity-docker-start.sh / -stop.sh  ← docker supervisor lifecycle
+│   └── gc-feed-ai                          ← textual TUI on top of `gc events --follow`
 ├── configs/
 │   └── gc-CLAUDE.md    (mayor operating recipe)
 └── CLAUDE.md           (guidance for Claude Code editing this repo)
