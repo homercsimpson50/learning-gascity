@@ -8,15 +8,16 @@ why this repo is shaped the way it is.
 ```
 learning-gascity/
 ├── README.md                                            ← you are here
+├── bootstrap.sh                                         ← BRAND-NEW MACHINE — installs gc, bd, dolt, then runs containerized/install.sh
 ├── containerized/                                       ← Option A: host gc + agents in scoped containers
 │   ├── agent-runner/   (image: minimal Debian + claude CLI)
-│   ├── shim/           (gc-docker-runner — wraps `claude` → `docker run`)
-│   ├── install.sh      (first run: build, shim, city init, gastown, supervisor up)
-│   ├── start.sh        (every day: docker, shim PATH, supervisor up, mayor wait)
-│   └── verify.sh
+│   ├── shim/           (gc-docker-runner + gc-docker wrapper)
+│   ├── install.sh      (build agent image, install shim + wrapper, verify)
+│   ├── uninstall.sh
+│   └── verify.sh       (7 isolation probes from the spec §8)
 ├── configs/                                             ← versioned config that survives a fresh laptop
-│   └── gc-CLAUDE.md    (mayor operating recipe — symlinked into ~/gc/CLAUDE.md by install.sh)
-├── scripts/                                             ← local launcher
+│   └── gc-CLAUDE.md    (mayor operating recipe — symlinked into ~/gc/CLAUDE.md)
+├── scripts/                                             ← local launcher (no isolation)
 │   ├── gascity-workspace.sh / .py   (4-pane iTerm2 layout against ~/gc)
 │   ├── gascity-start.sh / -stop.sh  (city lifecycle helpers)
 │   └── gc-feed-ai                   (streams events with periodic Ollama summary)
@@ -63,22 +64,38 @@ AWS creds, or `~/.config` are reachable from inside.
 
 The implementation follows
 [`docs/containerizing-gascity-for-local-use-spec.md`](docs/containerizing-gascity-for-local-use-spec.md):
-a small **`gc-docker-runner` shim** stands in for `claude`/`codex`/`gemini`
-on `PATH` and translates each agent invocation into a hardened
-`docker run` against `gascity-agent-runner:<agent>`.
+a small **`gc-docker-runner` shim** plus a **`gc-docker` wrapper** —
+neither touches your global PATH. Type `gc` for normal use; type
+`gc-docker` when you want sandboxed agents.
+
+#### Brand-new machine (one shot, ~5 minutes)
 
 ```bash
-cd containerized/
-./install.sh                      # first time only — builds image, installs shim,
-                                  # inits ~/gc with the gastown pack, symlinks
-                                  # CLAUDE.md, brings the supervisor up
-./start.sh                        # every day — docker check, shim PATH, supervisor up
-./start.sh --attach               # ...and attach to the mayor session
+git clone https://github.com/homercsimpson50/learning-gascity ~/code/learning-gascity
+cd ~/code/learning-gascity
+./bootstrap.sh
 ```
 
-After that, **just talk to the mayor** — say "start a rig at `~/code/foo`"
-or "build me X" and the mayor handles the gascity plumbing for you. No
-need to type `gc init`, `gc rig add`, or `bd create` by hand.
+`bootstrap.sh` installs everything: Homebrew (if missing), `gc` from
+the official tap, `bd`, `dolt`, `flock`, and then runs
+`containerized/install.sh` to build the agent image and install the
+shim + `gc-docker` wrapper. The only prereqs you need first are **git**
+and **Docker Desktop**.
+
+#### Already-set-up machine (just rebuild the container piece)
+
+```bash
+cd ~/code/learning-gascity/containerized
+./install.sh
+```
+
+#### Use it
+
+```bash
+gc <anything>             # normal local gc — agents on host
+gc-docker supervisor run  # foreground supervisor — agents in containers
+gc-docker init ~/test     # any gc subcommand works through the wrapper
+```
 
 Full guide: [`containerized/README.md`](containerized/README.md).
 

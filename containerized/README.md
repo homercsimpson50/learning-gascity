@@ -71,10 +71,22 @@ Spec reference: [§2 design overview](../docs/containerizing-gascity-for-local-u
 
 ## Quick start
 
-You only need Docker installed. If Docker isn't running, `install.sh`
-will start Docker Desktop on macOS and wait for it.
+### Brand-new machine
 
-### Setup (once per laptop)
+Use the top-level bootstrap, which installs gc / bd / dolt / flock for
+you (via Homebrew + the official tap) before running `install.sh`:
+
+```bash
+git clone https://github.com/homercsimpson50/learning-gascity ~/code/learning-gascity
+cd ~/code/learning-gascity
+./bootstrap.sh
+```
+
+Prereqs: **git** and **Docker Desktop** (anything else is auto-installed).
+
+### Already-set-up machine
+
+If `gc` is already on your PATH, just run `install.sh` directly:
 
 ```bash
 ./install.sh
