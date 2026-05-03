@@ -50,11 +50,21 @@ Upstream fixes need a `gc` binary upgrade — not edits here.
 - [`docs/containerizing-gascity-for-local-use-spec.md`](docs/containerizing-gascity-for-local-use-spec.md) — design spec the containerized path implements.
 - [`containerized/README.md`](containerized/README.md) — directory reference for `containerized/` (architecture, hard rules, config knobs, v1 limitations).
 - [`bootstrap.sh`](bootstrap.sh) — brand-new-machine entry for the work-machine path. Installs gc/bd/dolt/flock then hands off to `containerized/install.sh`.
+- [`upgrade.sh`](upgrade.sh) — bring everything up to date. Pulls the repo, upgrades `gc` / `bd` / `dolt` from upstream, rebuilds the agent image, refreshes the shim + workspace launchers. Idempotent.
+- [`configs/gc-CLAUDE.md`](configs/gc-CLAUDE.md) — operating recipe loaded by mayor at runtime (different audience: the agent, not the developer editing this repo).
 - This file — guidance for editing the repo, not for using gascity.
 
 ## Common commands (cheat sheet)
 
 For full flows see the how-tos above. Quick reference:
+
+### Brand-new machine / upgrade
+
+```bash
+./bootstrap.sh           # one-shot setup. idempotent.
+./upgrade.sh             # pull + upgrade gc/bd/dolt + rebuild image + reinstall shim
+./upgrade.sh --no-image  # skip the docker image rebuild (faster)
+```
 
 ### One-shot workspace launchers (PATH-installed shortcuts)
 
@@ -77,7 +87,6 @@ both and use the iTerm2 Python API (Magic must be enabled).
 ### Containerized (work-machine path)
 
 ```bash
-./bootstrap.sh                          # brand-new machine (installs everything)
 cd containerized && ./install.sh        # already-set-up machine (just the container piece)
 cd containerized && ./verify.sh         # 7 isolation probes from spec §8
 cd containerized && ./uninstall.sh      # reverse install.sh
@@ -135,9 +144,10 @@ the personal-laptop path.
     claude → gc-docker-runner         shim is selected by argv[0]
     .real-claude                      sidecar holding absolute path to the
                                       real Claude Code binary; the shim's
-                                      passthrough mode (GC_RIG_PATH unset)
-                                      execs this if it ever gets invoked
-                                      outside the gc spawn path
+                                      passthrough mode (GC_RIG unset) execs
+                                      this for city-scoped agents (mayor,
+                                      deacon, boot) and for any accidental
+                                      invocation outside the gc spawn path
 ~/.config/gascity-docker-runner/
   config.toml                         shim config: image map, network, limits
 ~/.local/state/gascity-docker-runner/
@@ -285,11 +295,15 @@ show a `start_command = …` line. Behaviorally, the supervisor's tmux
 spawn for an agent should end with `… /Users/<you>/.local/bin/gascity-shims/claude`
 directly (rather than a `sh -c '… exec claude …'` PATH-lookup chain).
 
-Mayor, deacon, boot, etc. don't have `GC_RIG_PATH` set (they're
-city-scoped, not rig-scoped), so the shim's passthrough mode runs the
-real claude binary on the host. Polecat-like agents that DO have
-`GC_RIG_PATH` set go through the docker-run path. Both behaviors are
-correct.
+Mayor, deacon, boot, etc. don't have `GC_RIG` set (they're city-scoped,
+not rig-scoped), so the shim's passthrough mode runs the real claude
+binary on the host. Polecats and other rig-scoped agents that DO have
+`GC_RIG` set go through the docker-run path, with `GC_DIR` (the
+per-agent worktree gc materialized at
+`.gc/worktrees/<rig>/polecats/<agent>`) bind-mounted at `/work`. Both
+behaviors are correct. (An older spec draft used `GC_RIG_PATH` for the
+trigger and the mount target; the shim still accepts that name as a
+fallback.)
 
 `gc` rejects `[agent_defaults] start_command = …` as an unknown field, so
 a single workspace-level default isn't possible — wire-shim is the
@@ -298,20 +312,23 @@ substitute.
 #### How an agent invocation flows
 
 1. `gc-supervisor` decides to spawn an agent for a bead.
-2. It execs the agent's `start_command` (set in `pack.toml`) — for the
-   gc-docker city this is `/Users/<you>/.local/bin/gascity-shims/claude`,
-   a symlink to `gc-docker-runner`. `GC_RIG_PATH`, `GC_BEAD_ID`,
-   `GC_AGENT_NAME`, `GC_SESSION_ID` are exported in the spawn env.
+2. It execs the agent's `start_command` (set in `pack.toml` /
+   `city.toml`) — for the gc-docker city this is
+   `$HOME/.local/bin/gascity-shims/claude`, a symlink to
+   `gc-docker-runner`. `GC_RIG`, `GC_RIG_ROOT`, `GC_DIR`, `GC_AGENT`,
+   `GC_TEMPLATE`, `GC_BEAD_ID`, `GC_SESSION_ID` are exported in the
+   spawn env (subset depending on agent scope).
 3. argv[0] is `claude` (from the symlink name), telling the shim which
    agent it's standing in for.
-4. The shim, if `GC_RIG_PATH` is unset, exec's the real claude binary
-   (path captured into `.real-claude` at install time) and exits — the
-   agent runs on the host. This is the right behavior for city-scoped
-   agents (mayor, deacon, boot) which don't have a worktree to mount.
-5. If `GC_RIG_PATH` IS set (rig-scoped agents like polecats), the shim:
+4. The shim, if `GC_RIG` is unset, exec's the real claude binary (path
+   captured into `.real-claude` at install time) and exits — the agent
+   runs on the host. This is the right behavior for city-scoped agents
+   (mayor, deacon, boot) which don't have a worktree to mount.
+5. If `GC_RIG` IS set (rig-scoped agents like polecats), the shim:
    - Reads `~/.config/gascity-docker-runner/config.toml` for the image
      mapping, network mode, and limits.
-   - Builds a `docker run` with `/work` bind-mounted to `GC_RIG_PATH`,
+   - Builds a `docker run` with `/work` bind-mounted to `GC_DIR` (the
+     per-agent worktree at `.gc/worktrees/<rig>/polecats/<agent>`),
      `--read-only` rootfs, tmpfs for `/tmp` + `~/.cache`, `--user 1000:1000`,
      `--cap-drop ALL`, `--security-opt no-new-privileges`, `--memory`,
      `--cpus`, `--pids-limit`, and only the whitelisted env vars
