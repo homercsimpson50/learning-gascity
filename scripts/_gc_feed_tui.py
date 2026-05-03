@@ -2,27 +2,36 @@
 """
 _gc_feed_tui.py — textual TUI for `gc events`, with periodic Ollama summary.
 
-Layout:
-  ┌─ Gas City — gc @ ~/gc ─────────────────────────────┐
-  │ Sessions / Beads (left)  │ Event stream (right)    │
-  │                          │                         │
-  │                          ├─────────────────────────┤
-  │                          │ AI summary (toggle 's') │
-  └────────────────────────────────────────────────────┘
-  q quit │ s toggle summary │ r refresh │ ↑/↓ scroll
+Wrapper-only — never touches the gc binary. Same behavior the user
+previously got by patching gastown's feed (branch feat/agent-observability-tui),
+re-implemented as an external process that subscribes to `gc events
+--follow` and shells out to Ollama.
 
-Invoked by `gc-feed-ai` (TUI mode). Stdlib + textual.
+Layout:
+  ┌─ header (city, supervisor status, buffer counters) ────┐
+  ├─ sessions table  ┬─ events log (scrollable)            ┤
+  ├─ beads table     │                                     │
+  ├──────────────────┼─ AI summary stream (scrollable, ────┤
+  │                  │  newest at bottom, focusable)       │
+  └──────────────────┴─────────────────────────────────────┘
+
+Keys:
+  q quit
+  s toggle AI summary panel
+  a force a summary right now
+  r refresh sessions/beads tables
+  tab cycle focus (events ↔ summary)
+  ↑/↓/j/k scroll focused panel
 """
 
 import asyncio
 import json
 import os
-import subprocess
 import sys
 import time
 import urllib.request
 from collections import deque
-from typing import Optional
+from typing import Optional, List
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -38,6 +47,17 @@ INTERVAL = int(os.environ.get("GC_FEED_AI_INTERVAL", "15"))
 DISABLED = os.environ.get("GC_FEED_AI_DISABLE", "0") == "1"
 HISTORY_SINCE = os.environ.get("GC_FEED_AI_HISTORY", "1h")
 BUF_MAX = 60
+
+# Actors and event types to skip in the feed (low-signal noise).
+NOISE_ACTORS = {"cache-reconcile"}
+NOISE_TYPES = {"controller.heartbeat"}
+
+# Prompt copied from the gastown feat/agent-observability-tui branch.
+SUMMARY_PROMPT = (
+    "Summarize these software agent events in 1-2 SHORT sentences. "
+    "Max 30 words. Say WHO is doing WHAT. No filler. No markdown formatting.\n\n"
+    "Events:\n{events}\n\nSummary:"
+)
 
 
 def fmt_event(ev: dict) -> str:
@@ -71,26 +91,33 @@ def fmt_event(ev: dict) -> str:
     return " ".join(bits)
 
 
-def fmt_event_plain(ev: dict) -> str:
+def fmt_event_for_prompt(ev: dict) -> str:
+    """Plain-text event line for the LLM prompt (matches gastown style)."""
     ts = ev.get("ts", "")[11:19]
-    typ = ev.get("type", "?")
     actor = ev.get("actor", "?")
+    typ = ev.get("type", "?")
     subject = ev.get("subject", "")
     bead = (ev.get("payload") or {}).get("bead") or {}
     title = bead.get("title", "") if isinstance(bead, dict) else ""
     itype = bead.get("issue_type", "") if isinstance(bead, dict) else ""
-    bits = [ts, typ, actor]
-    if subject:
-        bits.append(subject)
-    if itype:
-        bits.append(f"[{itype}]")
-    if title:
-        bits.append(f'"{title}"')
-    return " ".join(bits)
+    msg = ev.get("message", "")
+    extra = " ".join(filter(None, [
+        f"[{itype}]" if itype else "",
+        f'"{title}"' if title else "",
+        f"({msg})" if msg and msg != subject and msg != title else "",
+    ]))
+    return f"{ts} {actor}: {typ} {subject} {extra}".strip()
+
+
+def is_noise(ev: dict) -> bool:
+    if ev.get("actor") in NOISE_ACTORS:
+        return True
+    if ev.get("type") in NOISE_TYPES:
+        return True
+    return False
 
 
 async def run_gc(*args: str, timeout: float = 10.0) -> str:
-    """Run `gc <args>` in CITY_DIR and return stdout (str)."""
     proc = await asyncio.create_subprocess_exec(
         "gc", *args,
         cwd=CITY_DIR,
@@ -105,19 +132,14 @@ async def run_gc(*args: str, timeout: float = 10.0) -> str:
         return ""
 
 
-async def ollama_summarize(events: list) -> Optional[str]:
+async def ollama_summarize(events: List[dict]) -> Optional[tuple]:
+    """Returns (text, secs, tokens) or None."""
     if not events:
         return None
-    lines = [fmt_event_plain(e) for e in events]
-    prompt = (
-        "You are an AI agent activity summarizer. Given these recent events "
-        "from a multi-agent coding system (Gas City), write a 2-3 sentence "
-        "summary of what is happening right now. Be concise and specific. "
-        "Mention agents, sessions, or beads by name when relevant.\n\n"
-        "Events:\n" + "\n".join(lines) + "\n\nSummary:"
-    )
+    lines = [fmt_event_for_prompt(e) for e in events]
+    prompt = SUMMARY_PROMPT.format(events="\n".join(lines))
 
-    def _call() -> Optional[str]:
+    def _call():
         body = json.dumps(
             {"model": MODEL, "prompt": prompt, "stream": False}
         ).encode()
@@ -130,8 +152,13 @@ async def ollama_summarize(events: list) -> Optional[str]:
             with urllib.request.urlopen(req, timeout=120) as r:
                 resp = json.loads(r.read().decode())
         except Exception as e:
-            return f"(ollama error: {e})"
-        return (resp.get("response") or "").strip()
+            return (f"(ollama error: {e})", 0.0, 0)
+        text = (resp.get("response") or "").strip()
+        # Strip leading newlines (gastown bug fix carry-over).
+        text = text.lstrip("\n").strip()
+        secs = resp.get("total_duration", 0) / 1e9
+        tokens = resp.get("eval_count", 0)
+        return (text, secs, tokens)
 
     return await asyncio.to_thread(_call)
 
@@ -140,27 +167,40 @@ class GCFeedApp(App):
     CSS = """
     Screen { layout: vertical; }
 
-    #top { height: 1fr; }
-    #left { width: 38%; border-right: solid $accent; }
-    #right { width: 62%; }
+    #header_status { height: 1; padding: 0 1; background: $boost; }
 
-    #header_status { height: auto; padding: 0 1; background: $boost; }
+    #top { height: 1fr; }
+    #left { width: 36%; }
+    #right { width: 64%; border-left: solid $accent; }
 
     DataTable { height: 1fr; }
     #sessions { height: 50%; }
     #beads { height: 50%; }
 
-    #events { height: 70%; border-top: solid $accent; }
-    #summary { height: 30%; padding: 1; border-top: solid $warning; }
+    #events_panel { height: 1fr; }
+    #summary_panel { height: 14; border-top: solid $warning; }
 
-    .label { color: $accent; text-style: bold; }
+    #events { height: 1fr; }
+    #summary { height: 1fr; }
+
+    .focused { border: heavy $success; }
     """
 
     BINDINGS = [
         Binding("q", "quit", "Quit"),
+        Binding("ctrl+c", "quit", "Quit", show=False),
         Binding("s", "toggle_summary", "Toggle AI"),
-        Binding("r", "refresh", "Refresh"),
         Binding("a", "force_summary", "Now"),
+        Binding("r", "refresh", "Refresh"),
+        Binding("tab", "cycle_focus", "Focus →"),
+        Binding("up", "scroll_up", show=False),
+        Binding("down", "scroll_down", show=False),
+        Binding("j", "scroll_down", show=False),
+        Binding("k", "scroll_up", show=False),
+        Binding("pageup", "page_up", show=False),
+        Binding("pagedown", "page_down", show=False),
+        Binding("home", "scroll_home", show=False),
+        Binding("end", "scroll_end", show=False),
     ]
 
     show_summary: reactive[bool] = reactive(not DISABLED)
@@ -172,6 +212,7 @@ class GCFeedApp(App):
         self.last_summary_at = time.time()
         self.summarizing = False
         self._tail_proc: Optional[asyncio.subprocess.Process] = None
+        self.focused_panel = "events"  # or "summary"
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -181,8 +222,16 @@ class GCFeedApp(App):
                 yield DataTable(id="sessions", zebra_stripes=True)
                 yield DataTable(id="beads", zebra_stripes=True)
             with Vertical(id="right"):
-                yield RichLog(id="events", highlight=False, markup=True, wrap=False, max_lines=2000)
-                yield Static(id="summary", markup=True)
+                with Vertical(id="events_panel"):
+                    yield RichLog(
+                        id="events", highlight=False, markup=True,
+                        wrap=False, max_lines=2000,
+                    )
+                with Vertical(id="summary_panel"):
+                    yield RichLog(
+                        id="summary", highlight=False, markup=True,
+                        wrap=True, max_lines=200,
+                    )
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -197,33 +246,60 @@ class GCFeedApp(App):
         beads.add_columns("id", "type", "status", "title")
         beads.cursor_type = "row"
 
-        summary = self.query_one("#summary", Static)
+        summary = self.query_one("#summary", RichLog)
         if DISABLED:
-            summary.update("[dim]AI summary disabled (GC_FEED_AI_DISABLE=1)[/dim]")
+            summary.write("[dim]AI summary disabled (GC_FEED_AI_DISABLE=1)[/dim]")
         else:
-            summary.update(f"[dim]AI summary on. Model={MODEL}, every={EVERY} events / {INTERVAL}s. Press 's' to hide, 'a' to summarize now.[/dim]")
-        self._set_summary_visible(self.show_summary)
+            summary.write(
+                f"[dim]AI summary on. Model={MODEL}, every={EVERY} events / "
+                f"{INTERVAL}s. Press 's' to hide, 'a' to summarize now, "
+                f"tab to focus this panel, j/k to scroll.[/dim]"
+            )
 
-        # Kick off background tasks.
+        self._set_summary_visible(self.show_summary)
+        self._update_focus_styles()
+
         await self._refresh_state()
         await self._load_history()
-        self.set_interval(8.0, self._refresh_state_sync)
+        self.set_interval(8.0, lambda: asyncio.create_task(self._refresh_state()))
         if not DISABLED:
             self.set_interval(2.0, self._maybe_summarize_sync)
         asyncio.create_task(self._tail_events())
 
+    # --- panels ---------------------------------------------------------
+
     def _set_summary_visible(self, on: bool) -> None:
         try:
-            w = self.query_one("#summary", Static)
-            w.styles.display = "block" if on else "none"
+            panel = self.query_one("#summary_panel", Vertical)
+            panel.styles.display = "block" if on else "none"
         except Exception:
             pass
 
     def watch_show_summary(self, on: bool) -> None:
         self._set_summary_visible(on)
 
+    def _focused_widget(self):
+        wid = "events" if self.focused_panel == "events" else "summary"
+        return self.query_one(f"#{wid}", RichLog)
+
+    def _update_focus_styles(self) -> None:
+        for name in ("events", "summary"):
+            try:
+                w = self.query_one(f"#{name}", RichLog)
+                if name == self.focused_panel:
+                    w.add_class("focused")
+                else:
+                    w.remove_class("focused")
+            except Exception:
+                pass
+
+    # --- actions --------------------------------------------------------
+
     def action_toggle_summary(self) -> None:
         self.show_summary = not self.show_summary
+        if not self.show_summary and self.focused_panel == "summary":
+            self.focused_panel = "events"
+            self._update_focus_styles()
 
     def action_refresh(self) -> None:
         asyncio.create_task(self._refresh_state())
@@ -232,10 +308,32 @@ class GCFeedApp(App):
         if not DISABLED and not self.summarizing:
             asyncio.create_task(self._do_summarize())
 
-    # --- background workers ---------------------------------------------
+    def action_cycle_focus(self) -> None:
+        if self.focused_panel == "events" and self.show_summary:
+            self.focused_panel = "summary"
+        else:
+            self.focused_panel = "events"
+        self._update_focus_styles()
 
-    def _refresh_state_sync(self) -> None:
-        asyncio.create_task(self._refresh_state())
+    def action_scroll_up(self) -> None:
+        self._focused_widget().scroll_up()
+
+    def action_scroll_down(self) -> None:
+        self._focused_widget().scroll_down()
+
+    def action_page_up(self) -> None:
+        self._focused_widget().scroll_page_up()
+
+    def action_page_down(self) -> None:
+        self._focused_widget().scroll_page_down()
+
+    def action_scroll_home(self) -> None:
+        self._focused_widget().scroll_home()
+
+    def action_scroll_end(self) -> None:
+        self._focused_widget().scroll_end()
+
+    # --- background workers --------------------------------------------
 
     def _maybe_summarize_sync(self) -> None:
         if self.summarizing:
@@ -260,11 +358,15 @@ class GCFeedApp(App):
 
     def _update_header(self, supervisor_status: str) -> None:
         head = self.query_one("#header_status", Static)
-        sup = supervisor_status.strip().split("\n")[0] if supervisor_status else "supervisor: ?"
+        sup_line = (supervisor_status.strip().split("\n", 1)[0]
+                    if supervisor_status else "supervisor: ?")
+        ai = "off" if DISABLED else (
+            f"on • {MODEL} • every {EVERY}/{INTERVAL}s")
         head.update(
             f"[b cyan]{os.path.basename(CITY_DIR)}[/b cyan]  "
-            f"[dim]{CITY_DIR}[/dim]  │  [yellow]{sup}[/yellow]  │  "
-            f"buffered=[b]{len(self.event_buf)}[/b]  pending=[b]{self.events_since_summary}[/b]"
+            f"[dim]{CITY_DIR}[/dim]  │  [yellow]{sup_line}[/yellow]  │  "
+            f"buf=[b]{len(self.event_buf)}[/b]  pending=[b]{self.events_since_summary}[/b]  │  "
+            f"AI: [magenta]{ai}[/magenta]"
         )
 
     def _update_sessions(self, gc_session_list_output: str) -> None:
@@ -274,7 +376,6 @@ class GCFeedApp(App):
             parts = line.split()
             if len(parts) < 3:
                 continue
-            # ID TEMPLATE STATE [REASON] [TARGET] [TITLE] [AGE] [LAST ACTIVE]
             sid, tmpl, state = parts[0], parts[1], parts[2]
             last = " ".join(parts[-2:]) if len(parts) >= 5 else ""
             sess.add_row(f"{tmpl} ({sid})", state, last)
@@ -286,7 +387,6 @@ class GCFeedApp(App):
             line = line.rstrip()
             if not line:
                 continue
-            # bd ready output: "  o gc-XXX ● P? title…"
             stripped = line.lstrip(" o●*")
             parts = stripped.split(maxsplit=2)
             if not parts:
@@ -299,6 +399,7 @@ class GCFeedApp(App):
     async def _load_history(self) -> None:
         out = await run_gc("events", "--since", HISTORY_SINCE, timeout=15)
         log = self.query_one("#events", RichLog)
+        added = 0
         for line in out.splitlines():
             line = line.strip()
             if not line:
@@ -307,10 +408,13 @@ class GCFeedApp(App):
                 ev = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if is_noise(ev):
+                continue
             log.write(fmt_event(ev))
             self.event_buf.append(ev)
             self.events_since_summary += 1
-        log.write(f"[dim]── live events follow ──[/dim]")
+            added += 1
+        log.write(f"[dim]── {added} historical events; live follows ──[/dim]")
 
     async def _tail_events(self) -> None:
         self._tail_proc = await asyncio.create_subprocess_exec(
@@ -330,6 +434,8 @@ class GCFeedApp(App):
             except json.JSONDecodeError:
                 log.write(line)
                 continue
+            if is_noise(ev):
+                continue
             log.write(fmt_event(ev))
             self.event_buf.append(ev)
             self.events_since_summary += 1
@@ -341,16 +447,17 @@ class GCFeedApp(App):
         snapshot = list(self.event_buf)
         self.events_since_summary = 0
         self.last_summary_at = time.time()
-        summary_w = self.query_one("#summary", Static)
-        summary_w.update("[dim]summarizing…[/dim]")
-        t0 = time.time()
-        text = await ollama_summarize(snapshot)
-        secs = time.time() - t0
-        ts = time.strftime("%H:%M:%S")
-        summary_w.update(
-            f"[b yellow]AI summary[/b yellow] [dim]({ts}, {secs:.1f}s, model={MODEL}, n={len(snapshot)})[/dim]\n"
-            f"{text or '(no response)'}"
-        )
+        summary_w = self.query_one("#summary", RichLog)
+        summary_w.write("[dim]summarizing…[/dim]")
+        result = await ollama_summarize(snapshot)
+        if result:
+            text, secs, tokens = result
+            ts = time.strftime("%H:%M:%S")
+            summary_w.write(
+                f"[b yellow]{ts}[/b yellow] [dim]({secs:.1f}s, {tokens}t, n={len(snapshot)})[/dim]"
+            )
+            summary_w.write(text or "(no response)")
+            summary_w.write("")  # spacer
         self.summarizing = False
 
     async def on_unmount(self) -> None:

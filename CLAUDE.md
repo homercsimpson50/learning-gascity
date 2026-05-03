@@ -62,7 +62,8 @@ cd ~/gc && gc doctor                  # health check
 cd ~/gc && gc status                  # city + sessions
 cd ~/gc && gc session attach mayor    # attach to mayor (also what the workspace's left pane runs)
 cd ~/gc && gc events --follow         # live event stream (the "feed" pane)
-cd ~/gc && ../code/learning-gascity/scripts/gc-feed-ai     # same stream + periodic Ollama summary
+cd ~/gc && ../code/learning-gascity/scripts/gc-feed-ai     # rich TUI (sessions/beads/events/AI panes; q s a r tab j/k)
+cd ~/gc && ../code/learning-gascity/scripts/gc-feed-ai --simple  # stdlib-only streaming fallback
 gc supervisor status                  # is the machine-wide supervisor up?
 ```
 
@@ -116,23 +117,37 @@ a silent path bug in an earlier revision).
 ### `scripts/gc-feed-ai` (the "--ai" feed)
 
 `gc events --follow` is JSON-Lines, not a TUI like `gt feed`. To recover
-the gastown `gtc feed --ai` UX, this repo ships a wrapper pair:
+the gastown `gtc feed --ai` UX (which the user previously got by patching
+gastown source on branch `feat/agent-observability-tui`), this repo ships
+a wrapper trio. **No upstream gascity binary is touched or rebuilt.**
 
 - `scripts/gc-feed-ai` — bash entry point. Ensures Ollama is installed,
-  running, and has the model pulled (`qwen2.5:3b` by default). Pipes
-  `gc events --follow` into the Python helper. Stops Ollama via
-  `brew services stop` on exit to free RAM (matches gtc lifecycle hygiene).
-- `scripts/_gc_feed_ai.py` — stdlib-only summarizer. Pretty-prints each
-  event one line at a time. Every `GC_FEED_AI_EVERY` events (default 8) or
-  `GC_FEED_AI_INTERVAL` seconds (default 45), POSTs the recent buffer to
-  Ollama's `/api/generate` and prints a 2-3 sentence summary block.
+  running, and has the model pulled (`qwen2.5:3b` by default). Then either
+  launches the textual TUI (default) or falls back to the streaming
+  summarizer (`--simple`). Stops Ollama via `brew services stop` on exit
+  to free RAM (matches gtc lifecycle hygiene).
+- `scripts/_gc_feed_tui.py` — textual TUI (default). Layout: header strip
+  on top; left column with sessions and beads tables (refreshed every 8s
+  via `gc session list` + `gc bd ready`); right column with a scrollable
+  events log (history pre-loaded via `gc events --since 1h`, then
+  `gc events --follow`) and a scrollable summary panel that accumulates
+  Ollama summaries newest-at-bottom. Keys: q quit, s toggle summary,
+  a force-summarize-now, r refresh, tab cycle focus, j/k/↑/↓ scroll.
+  Requires `pip3 install --user textual`.
+- `scripts/_gc_feed_ai.py` — stdlib-only streaming fallback (`--simple`).
+  Pretty-prints each event one line at a time and prints periodic summary
+  blocks inline. Used when textual isn't available.
 
-Knobs: `GC_FEED_AI_MODEL` (model name), `GC_FEED_AI_EVERY`,
-`GC_FEED_AI_INTERVAL`, `OLLAMA_URL`, `GC_FEED_AI_DISABLE=1` (no-AI
-formatting only — sanity-checks the JSON parse without burning Ollama).
+Knobs (env or `~/.gc-feed-ai.conf`): `GC_FEED_AI_MODEL`, `GC_FEED_AI_EVERY`
+(default 8 events), `GC_FEED_AI_INTERVAL` (default 15s),
+`GC_FEED_AI_HISTORY` (default `1h`, controls `gc events --since` on
+startup), `OLLAMA_URL`, `GC_FEED_AI_DISABLE=1`.
 
-This is **pure wrapper code** — no upstream gascity binaries are touched
-or rebuilt. It works against any `gc events --follow` output.
+The TUI's summary prompt and rolling-history pattern are copied verbatim
+from the gastown branch — same "Max 30 words. Say WHO is doing WHAT. No
+filler" prompt, same newest-last summary stream. Only difference: there
+the logic lived in Go inside `internal/tui/feed/summary.go`; here it lives
+in Python outside `gc`.
 
 ### Option A architecture (`containerized/`)
 
