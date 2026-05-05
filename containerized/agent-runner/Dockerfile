@@ -57,6 +57,15 @@ RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_VERSION}" \
 COPY --chown=root:root entrypoint.sh /usr/local/bin/agent-entrypoint.sh
 RUN chmod +x /usr/local/bin/agent-entrypoint.sh
 
+# v2 broker integration (docs/credential-broker-v2-spec.md §8.5):
+# the agent uses GIT_SSH_COMMAND="ssh -F /etc/ssh/ssh_config_gc" to talk
+# to github.com via the gc-broker-github-ssh socket. The config file
+# pins IdentityAgent to /run/sshagent/gc.sock and StrictHostKeyChecking
+# to a known_hosts the broker copies in. Shipped here so the agent
+# image is self-contained.
+COPY --chown=root:root ssh_config_gc /etc/ssh/ssh_config_gc
+RUN chmod 0644 /etc/ssh/ssh_config_gc
+
 USER agent
 WORKDIR /work
 

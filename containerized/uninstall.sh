@@ -51,6 +51,7 @@ rm -f "$WRAPPER_BIN" \
       "$HOME/.local/bin/gc-workspace.sh" \
       "$HOME/.local/bin/gc-docker-start.sh" \
       "$HOME/.local/bin/gc-docker-stop.sh" \
+      "$HOME/.local/bin/gc-broker-creds-extract.sh" \
       "$HOME/.local/bin/gc-workspace-home.sh" \
       "$HOME/.local/bin/gc-workspace-work.sh" \
       "$HOME/.local/bin/gc-workspace-home.py" \
@@ -81,11 +82,28 @@ else
     ok "$RC has no learning-gascity PATH lines (nothing to clean)"
 fi
 
+# Stop & remove v2 broker containers if running, then their networks/volume.
+say "Cleaning up v2 broker runtime state"
+for broker in gc-broker-anthropic gc-broker-github-api gc-broker-github-ssh; do
+    if docker ps --format '{{.Names}}' | grep -qx "$broker"; then
+        docker stop --time=5 "$broker" >/dev/null 2>&1 || true
+        ok "Stopped $broker"
+    fi
+done
+docker network rm gc-broker-net gc-egress-net 2>/dev/null && \
+    ok "Removed networks gc-broker-net + gc-egress-net" || \
+    ok "Networks already absent (or in use)"
+docker volume rm gc-sshagent-sock 2>/dev/null && \
+    ok "Removed volume gc-sshagent-sock" || \
+    ok "Volume gc-sshagent-sock already absent (or in use)"
+
 echo
 printf '\e[1;32m✓ Uninstalled.\e[0m\n\n'
 cat <<EOF
 Preserved (delete by hand if you want them gone):
     docker rmi gascity-agent-runner:claude
+    docker rmi gascity-broker-anthropic:v1 gascity-broker-github-api:v1 gascity-broker-github-ssh:v1
     rm -rf ~/.config/gascity-docker-runner
     rm -rf ~/.local/state/gascity-docker-runner
+    rm -rf ~/.local/state/gascity-broker
 EOF

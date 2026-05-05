@@ -97,7 +97,16 @@ LIM_CPU="$(toml_get limits cpus)";   : "${LIM_CPU:=2}"
 LIM_PIDS="$(toml_get limits pids_limit)"; : "${LIM_PIDS:=512}"
 TIMEOUT="$(toml_get limits timeout)"; : "${TIMEOUT:=30m}"
 
-NETWORK="$(toml_get network mode)"; : "${NETWORK:=bridge}"
+# v2: the network is forced to gc-broker-net (--internal). This is the
+# whole isolation story — agents have no internet egress and reach
+# Anthropic / GitHub only via the brokers. We still read the legacy
+# [network] mode key so old configs don't blow up; we just warn if it
+# names something other than the v2 network.
+LEGACY_NETWORK="$(toml_get network mode)"
+NETWORK="gc-broker-net"
+if [ -n "$LEGACY_NETWORK" ] && [ "$LEGACY_NETWORK" != "$NETWORK" ] && [ "$LEGACY_NETWORK" != "bridge" ]; then
+    echo "[gc-docker-runner] warn: [network] mode=$LEGACY_NETWORK is ignored under v2 (forced to $NETWORK)" >&2
+fi
 
 # --- Resolve the rig path --------------------------------------------------
 # Mount the agent's per-agent worktree (GC_DIR) at /work — that's the
@@ -125,6 +134,13 @@ LOG_FILE="$LOG_DIR/${GC_SESSION_ID:-$$}.log"
 
 # --- Forwarded env (whitelist) --------------------------------------------
 # Only forward what the agent + supervisor need. Everything else is dropped.
+#
+# v2: ANTHROPIC_API_KEY / OPENAI_API_KEY / GOOGLE_API_KEY / CLAUDE_API_KEY
+# / GH_TOKEN are NOT in this list. Those credentials live in the broker
+# containers; agents reach them via the broker base URLs injected below.
+# Forwarding the env vars too would let the agent's CLI prefer them
+# (claude-code does ANTHROPIC_API_KEY > ANTHROPIC_BASE_URL+OAuth) and
+# bypass the broker entirely.
 FORWARD_ENV=(
     GC_RIG
     GC_RIG_ROOT
@@ -137,11 +153,6 @@ FORWARD_ENV=(
     GC_PROVIDER
     GC_GIT_USER
     GC_GIT_EMAIL
-    GH_TOKEN
-    ANTHROPIC_API_KEY
-    OPENAI_API_KEY
-    GOOGLE_API_KEY
-    CLAUDE_API_KEY
 )
 ENV_FLAGS=()
 for v in "${FORWARD_ENV[@]}"; do
@@ -150,13 +161,19 @@ for v in "${FORWARD_ENV[@]}"; do
     fi
 done
 
-# Always provide a non-empty value for ENV_FLAGS so `${ENV_FLAGS[@]}` is
-# safe to expand under `set -u` (bash 3.2 on macOS treats expansion of
-# an empty array as an unbound variable). The trailing empty -e value
-# would be invalid to docker, so only do this if the array is empty.
-if [ ${#ENV_FLAGS[@]} -eq 0 ]; then
-    ENV_FLAGS=( -e "GC_AGENT=anon" )
-fi
+# v2: injected env (always set, regardless of host env). These point the
+# agent at the brokers on gc-broker-net. The agent has no other route
+# off the docker-internal network, so these URLs are the only way it
+# can reach Anthropic / GitHub at all.
+INJECT_ENV=(
+    "ANTHROPIC_BASE_URL=http://gc-broker-anthropic:8080"
+    "GITHUB_API_URL=http://gc-broker-github-api:8080"
+    "SSH_AUTH_SOCK=/run/sshagent/gc.sock"
+    "GIT_SSH_COMMAND=ssh -F /etc/ssh/ssh_config_gc"
+)
+for kv in "${INJECT_ENV[@]}"; do
+    ENV_FLAGS+=( -e "$kv" )
+done
 
 # --- docker run ------------------------------------------------------------
 # Every flag here has a reason. See spec §4 before stripping anything.
@@ -170,6 +187,7 @@ exec_docker() {
         --tmpfs "/home/agent/.cache:size=512m" \
         --workdir /work \
         -v "$RIG_PATH:/work:rw,Z" \
+        -v "gc-sshagent-sock:/run/sshagent:ro" \
         --network "$NETWORK" \
         --memory="$LIM_MEM" \
         --cpus="$LIM_CPU" \

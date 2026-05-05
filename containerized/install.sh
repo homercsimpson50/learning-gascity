@@ -80,19 +80,42 @@ ensure_docker() {
 ensure_docker
 
 # ---------------------------------------------------------------------------
-# 2. Build the agent image
+# 2. Build the agent image + v2 broker images
 # ---------------------------------------------------------------------------
 if [ "$DO_BUILD" -eq 1 ]; then
     say "Building gascity-agent-runner:claude (first build takes ~3 min)"
     docker build -t gascity-agent-runner:claude agent-runner/ >/dev/null
     ok "Image built"
+
+    for broker in anthropic github-api github-ssh; do
+        say "Building gascity-broker-${broker}:v1"
+        docker build -t "gascity-broker-${broker}:v1" "brokers/${broker}/" >/dev/null
+        ok "broker image: gascity-broker-${broker}:v1"
+    done
 else
     if ! docker image inspect gascity-agent-runner:claude >/dev/null 2>&1; then
         warn "image gascity-agent-runner:claude not present — re-run without --no-build"
         exit 1
     fi
-    ok "Image already present (build skipped)"
+    ok "Images already present (build skipped)"
 fi
+
+# ---------------------------------------------------------------------------
+# 2b. v2 networks + ssh-agent socket volume (idempotent)
+# ---------------------------------------------------------------------------
+# gc-broker-net (--internal): the agent's only network — no internet route.
+# gc-egress-net: brokers attach to this too so they can reach upstream.
+# gc-sshagent-sock: shared docker volume; SSH broker writes the socket,
+#   agent containers mount :ro and connect.
+docker network inspect gc-broker-net >/dev/null 2>&1 || \
+    docker network create --internal --driver bridge gc-broker-net >/dev/null
+ok "Network gc-broker-net (--internal) ready"
+docker network inspect gc-egress-net >/dev/null 2>&1 || \
+    docker network create --driver bridge gc-egress-net >/dev/null
+ok "Network gc-egress-net ready"
+docker volume inspect gc-sshagent-sock >/dev/null 2>&1 || \
+    docker volume create gc-sshagent-sock >/dev/null
+ok "Volume gc-sshagent-sock ready"
 
 # ---------------------------------------------------------------------------
 # 3. Install the shim + wire-shim helper (NOT on global PATH)
@@ -199,6 +222,8 @@ mkdir -p "$HOME/.local/bin"
 declare -a SYMS=(
     "gascity-docker-start.sh:gc-docker-start.sh"
     "gascity-docker-stop.sh:gc-docker-stop.sh"
+    # v2 broker credential extractor (one-shot Keychain → flat file).
+    "gc-broker-creds-extract.sh:gc-broker-creds-extract.sh"
     # Mode-swap wrappers — swap supervisors then open the right workspace.
     "gascity-workspace-home.sh:gc-workspace-home.sh"
     "gascity-workspace-work.sh:gc-workspace-work.sh"

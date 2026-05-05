@@ -74,6 +74,35 @@ else
     cd ..
 fi
 
+# v2 broker migration notice — only printed once per machine.
+NOTICE_MARK="$HOME/.local/state/gascity-docker-runner/.v2-notice-shown"
+if [ ! -f "$NOTICE_MARK" ] && [ -f "$HOME/.config/gascity-docker-runner/config.toml" ]; then
+    if ! grep -q '^\[broker\]' "$HOME/.config/gascity-docker-runner/config.toml" 2>/dev/null; then
+        cat <<'NOTICE'
+
+──────────────────────────────────────────────────────────────────────────
+ v2 credential brokers are available.
+
+ Three sidecar containers now hold credentials so agents authenticate to
+ Anthropic and GitHub without host secrets in the agent container.
+
+ To enable:
+   1. Add [broker] sections to ~/.config/gascity-docker-runner/config.toml
+      (see containerized/shim/config.example.toml for the schema).
+   2. Generate or pick an SSH key for the broker; update broker.github_ssh.key_file.
+   3. Run: cd containerized && ./install.sh    (rebuilds broker images)
+   4. export GH_TOKEN=ghp_…  in your shell, then: gc-docker-start.sh
+
+ Read docs/credential-broker-v2-spec.md §10.2 for the full setup checklist.
+ Until you opt in, agents fall back to v1 behavior (no auth in container).
+──────────────────────────────────────────────────────────────────────────
+
+NOTICE
+        mkdir -p "$(dirname "$NOTICE_MARK")"
+        touch "$NOTICE_MARK"
+    fi
+fi
+
 cat <<EOF
 
 \e[1;32m✓ Upgrade complete.\e[0m
@@ -81,8 +110,8 @@ cat <<EOF
    Verify:
        gc version
        bd --version
-       docker images gascity-agent-runner   # check latest tag/created time
-       cd containerized && ./verify.sh      # 7 isolation probes
+       docker images gascity-agent-runner gascity-broker-anthropic gascity-broker-github-api gascity-broker-github-ssh
+       cd containerized && ./verify.sh      # v1 probes + v2 broker probes (skips if brokers down)
 
    If you were running a workspace, you'll want to swap supervisors so
    the new gc binary is in charge:

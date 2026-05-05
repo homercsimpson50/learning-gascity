@@ -99,6 +99,22 @@ if [ "$KILLED_ANY" -eq 0 ]; then
     ok "nothing was running"
 fi
 
+# --- 2b. Stop the v2 credential brokers -----------------------------------
+# Brokers are run with --rm so `docker stop` deletes them. The networks
+# (gc-broker-net, gc-egress-net) and the gc-sshagent-sock volume are
+# left in place for the next start.
+BROKER_STOPPED=0
+for broker in gc-broker-anthropic gc-broker-github-api gc-broker-github-ssh; do
+    if docker ps --format '{{.Names}}' | grep -qx "$broker"; then
+        if [ "$BROKER_STOPPED" -eq 0 ]; then
+            step "stopping v2 credential brokers"
+            BROKER_STOPPED=1
+        fi
+        docker stop --time=5 "$broker" >/dev/null 2>&1 || true
+        ok "stopped $broker"
+    fi
+done
+
 # --- 3. Optionally bring local back up -------------------------------------
 if [ "$RESTART_LOCAL" -eq 1 ]; then
     step "bringing local supervisor back up against $LOCAL_CITY"

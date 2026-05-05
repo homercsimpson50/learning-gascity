@@ -15,12 +15,11 @@ claude = "gascity-agent-runner:claude"
 # gemini = "gascity-agent-runner:gemini"
 
 [network]
-# v1: "bridge" uses Docker's default bridge with no allowlist enforcement.
-# This is acceptable for accidental-footgun protection but is NOT a hard
-# isolation boundary against a determined model. For a stricter posture,
-# stand up a custom network + DNS allowlist (see §6 of the spec) and
-# change this to that network's name.
-mode = "bridge"
+# v2: this value is read for backwards compatibility but ignored — the
+# shim forces agents onto gc-broker-net (--internal, no internet egress).
+# Brokers are the only reachable network destinations from inside the
+# agent container. See docs/credential-broker-v2-spec.md §5.
+mode = "gc-broker-net"
 
 [limits]
 # Hard caps on the agent container. Tune if you see OOMs on real work.
@@ -29,3 +28,51 @@ cpus       = "2"
 pids_limit = 512
 # Hard kill the container after this duration. Use s/m/h/d suffix.
 timeout    = "30m"
+
+# ---------------------------------------------------------------------------
+# v2 credential brokers
+# ---------------------------------------------------------------------------
+# Three sidecar containers hold credentials so agents never see them.
+# See docs/credential-broker-v2-spec.md.
+
+[broker]
+# Master switch. If false, brokers are not started and agents have no
+# auth — useful for quick debugging. Default is true.
+enabled = true
+
+[broker.anthropic]
+image            = "gascity-broker-anthropic:v1"
+# On macOS the OAuth token is in Keychain rather than this file. The
+# host-side extractor (scripts/gc-broker-creds-extract.sh) writes it to
+# the path below before the broker starts; the broker bind-mounts that.
+credentials_file = "~/.local/state/gascity-broker/creds.json"
+# Optional. Leave empty to allow any model.
+model_allowlist  = []
+
+[broker.github_api]
+image          = "gascity-broker-github-api:v1"
+# Name of the env var on the host shell whose value is forwarded to the
+# broker as GH_TOKEN. The broker reads it once at startup; rotate by
+# restarting via gc-docker-stop.sh + gc-docker-start.sh.
+gh_token_env   = "GH_TOKEN"
+# Repos the agent is allowed to touch. Empty list = deny all repo-scoped
+# requests. Use "owner/*" for any repo under owner; "owner/repo" for
+# exact match. Examples (uncomment + edit):
+# repo_allowlist = ["myhandle/*", "myorg/some-repo"]
+repo_allowlist = []
+
+[broker.github_ssh]
+image            = "gascity-broker-github-ssh:v1"
+# Path to the SSH private key the broker should load into ssh-agent.
+# v2 expects an UNENCRYPTED key. To generate one specifically for agent
+# use:
+#     ssh-keygen -t ed25519 -f ~/.ssh/id_gc_agent -N ""
+#     # paste ~/.ssh/id_gc_agent.pub at github.com/settings/keys
+key_file         = "~/.ssh/id_ed25519"
+known_hosts_file = "~/.ssh/known_hosts"
+allowed_host     = "github.com"
+# Same syntax + behavior as broker.github_api.repo_allowlist. NOTE:
+# enforced at the network/known_hosts level for SSH (the broker only
+# loads keys for github.com), NOT per-repo for `git push`. See spec
+# §7.3 for the v2 limitation.
+repo_allowlist   = []

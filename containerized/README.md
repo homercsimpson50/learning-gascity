@@ -10,16 +10,24 @@ containerized/
 ├── README.md              ← you are here (reference)
 ├── agent-runner/          image built locally as gascity-agent-runner:claude
 │   ├── Dockerfile         debian-slim + nodejs + Claude Code via npm
-│   └── entrypoint.sh      validates env contract, drops to agent user, execs CLI
+│   ├── entrypoint.sh      validates env contract, drops to agent user, execs CLI
+│   └── ssh_config_gc      pinned to broker socket; used via GIT_SSH_COMMAND
+├── brokers/               v2 credential brokers (one per credential type)
+│   ├── anthropic/         OAuth bearer injection for api.anthropic.com
+│   │   ├── Dockerfile, proxy.py, README.md
+│   ├── github-api/        GH_TOKEN injection + repo/path/method allowlist
+│   │   ├── Dockerfile, proxy.py, README.md
+│   └── github-ssh/        ssh-agent on shared volume; never exposes key
+│       ├── Dockerfile, entrypoint.sh, README.md
 ├── shim/
 │   ├── gc-docker-runner   bash; argv[0] picks agent, builds docker run, forwards stdio + signals
 │   ├── gc-docker          user-facing wrapper: prepends shim dir to PATH, execs gc
-│   └── config.example.toml image map, network mode, limits
+│   └── config.example.toml image map, network mode, limits, [broker.*] sections
 ├── wire-shim.sh           idempotent helper: inserts start_command into
 │                          every [[agent]] block in pack.toml/city.toml
-├── install.sh             docker check → image build → shim + wire-shim install → verify
+├── install.sh             docker check → image + broker builds → networks/volume → shim install → verify
 ├── uninstall.sh           reverse install.sh (preserves image, config, logs)
-└── verify.sh              7 isolation probes from spec §8
+└── verify.sh              v1 7 probes + v2 broker probes (A/B/C suite)
 ```
 
 ---

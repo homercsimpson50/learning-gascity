@@ -1,0 +1,20 @@
+# /etc/ssh/ssh_config_gc — agent SSH config for github.com via the
+# gc-broker-github-ssh ssh-agent socket.
+#
+# The shim injects:
+#     GIT_SSH_COMMAND="ssh -F /etc/ssh/ssh_config_gc"
+# so git/gh use this config without touching the user's ~/.ssh/.
+#
+# IdentityAgent points at the broker socket on the shared volume.
+# StrictHostKeyChecking yes + UserKnownHostsFile pinned to the broker's
+# copy of the host's known_hosts means a poisoned DNS to non-github.com
+# would fail authentication rather than prompt the agent.
+
+Host github.com
+    IdentityAgent /run/sshagent/gc.sock
+    IdentitiesOnly yes
+    StrictHostKeyChecking yes
+    UserKnownHostsFile /run/sshagent/known_hosts
+    # Avoid prompting on first connect; relies on known_hosts being
+    # populated by the broker (which copies host's ~/.ssh/known_hosts).
+    PreferredAuthentications publickey

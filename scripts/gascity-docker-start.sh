@@ -41,6 +41,9 @@ CITY="${GC_DOCKER_CITY:-$HOME/gc-docker}"
 SHIM_DIR="$HOME/.local/bin/gascity-shims"
 LOG_FILE="$HOME/.local/state/gascity-docker-runner/supervisor.log"
 PIDFILE="$HOME/.local/state/gascity-docker-runner/supervisor.pid"
+BROKER_CONFIG="$HOME/.config/gascity-docker-runner/config.toml"
+BROKER_STATE_DIR="$HOME/.local/state/gascity-broker"
+BROKER_CREDS_FILE="$BROKER_STATE_DIR/creds.json"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -87,6 +90,203 @@ fi
 # fast and our new supervisor saw "supervisor already running" and
 # exited, leaving the OLD (non-shim-aware) supervisor in charge.
 
+# --- toml helper (for [broker.*] config lookup) ---------------------------
+# Same shape as the shim's toml_get; duplicated here so the start script
+# doesn't depend on the shim being on PATH yet.
+toml_get() {
+    local section="$1" key="$2" file="${3:-$BROKER_CONFIG}"
+    [ -f "$file" ] || { echo ""; return; }
+    awk -v s="$section" -v k="$key" '
+        $0 ~ "^\\["s"\\]" {inside=1; next}
+        inside && $0 ~ "^\\[" {inside=0}
+        inside && $0 ~ "^[[:space:]]*"k"[[:space:]]*=" {
+            sub("^[^=]*=[[:space:]]*\"?", ""); sub("\"?[[:space:]]*$", "");
+            print; exit
+        }
+    ' "$file" 2>/dev/null
+}
+toml_expand() {
+    # Expand a leading ~ to $HOME.
+    case "$1" in
+        '~/'*) printf '%s\n' "$HOME/${1#~/}" ;;
+        '~')   printf '%s\n' "$HOME" ;;
+        *)     printf '%s\n' "$1" ;;
+    esac
+}
+
+# --- v2 brokers: ensure_brokers --------------------------------------------
+# Bring up the three credential broker containers. Idempotent — if
+# they're already running, we re-use them. See
+# docs/credential-broker-v2-spec.md §9.2.
+ensure_brokers() {
+    local enabled
+    enabled="$(toml_get broker enabled)"
+    if [ -n "$enabled" ] && [ "$enabled" = "false" ]; then
+        echo "${YELLOW}    [broker] enabled=false in $BROKER_CONFIG — skipping broker startup${NC}"
+        echo "${YELLOW}    agents will have NO Anthropic / GitHub auth${NC}"
+        return 0
+    fi
+
+    echo "${GREEN}→${NC} ensuring v2 credential brokers"
+
+    # Networks + volume (idempotent; install.sh creates these too).
+    docker network inspect gc-broker-net >/dev/null 2>&1 || \
+        docker network create --internal --driver bridge gc-broker-net >/dev/null
+    docker network inspect gc-egress-net >/dev/null 2>&1 || \
+        docker network create --driver bridge gc-egress-net >/dev/null
+    docker volume inspect gc-sshagent-sock >/dev/null 2>&1 || \
+        docker volume create gc-sshagent-sock >/dev/null
+
+    # ---- Anthropic broker -------------------------------------------------
+    if ! docker ps --format '{{.Names}}' | grep -qx gc-broker-anthropic; then
+        # Refresh the credentials file from macOS Keychain. The broker
+        # re-reads on each request, so any rotation that happens while
+        # the broker is up is picked up — but the file has to exist for
+        # the broker to start at all.
+        if [ -x "$SHIM_DIR/gc-broker-creds-extract.sh" ]; then
+            "$SHIM_DIR/gc-broker-creds-extract.sh" 2>&1 | sed 's/^/    /'
+        elif command -v gc-broker-creds-extract.sh >/dev/null 2>&1; then
+            gc-broker-creds-extract.sh 2>&1 | sed 's/^/    /'
+        else
+            echo "${RED}    ✗ gc-broker-creds-extract.sh not found — re-run containerized/install.sh${NC}" >&2
+            return 1
+        fi
+        if [ ! -f "$BROKER_CREDS_FILE" ]; then
+            echo "${RED}    ✗ creds extractor did not produce $BROKER_CREDS_FILE${NC}" >&2
+            return 1
+        fi
+
+        local anth_image
+        anth_image="$(toml_get broker.anthropic image)"
+        : "${anth_image:=gascity-broker-anthropic:v1}"
+
+        local model_allow
+        # Best-effort: parse the array form. Empty/unparseable → no env var.
+        model_allow="$(awk '
+            /^\[broker\.anthropic\]/ {inside=1; next}
+            inside && /^\[/ {inside=0}
+            inside && /^[[:space:]]*model_allowlist[[:space:]]*=/ {
+                sub(/^[^=]*=[[:space:]]*/, ""); print; exit
+            }
+        ' "$BROKER_CONFIG" 2>/dev/null \
+          | tr -d '[]" ' | tr ',' '\n' | grep -v '^$' | paste -sd, -)"
+
+        docker run -d --rm --name gc-broker-anthropic \
+            --network gc-broker-net \
+            --user 1000:1000 --read-only \
+            --tmpfs /tmp:size=64m,mode=1777 \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --pids-limit 64 --memory 256m \
+            -e "MODEL_ALLOWLIST=$model_allow" \
+            -v "$BROKER_CREDS_FILE:/secrets/creds.json:ro" \
+            "$anth_image" >/dev/null
+        docker network connect gc-egress-net gc-broker-anthropic
+        echo "    ✓ gc-broker-anthropic started"
+    else
+        echo "    ✓ gc-broker-anthropic already running"
+    fi
+
+    # ---- GitHub-API broker ------------------------------------------------
+    if ! docker ps --format '{{.Names}}' | grep -qx gc-broker-github-api; then
+        local gh_token_env_name gh_token_value
+        gh_token_env_name="$(toml_get broker.github_api gh_token_env)"
+        : "${gh_token_env_name:=GH_TOKEN}"
+        gh_token_value="${!gh_token_env_name:-}"
+        if [ -z "$gh_token_value" ]; then
+            echo "${RED}    ✗ env var $gh_token_env_name is unset — set it before starting the broker${NC}" >&2
+            echo "${RED}      e.g. export GH_TOKEN=ghp_...${NC}" >&2
+            return 1
+        fi
+
+        local gh_image
+        gh_image="$(toml_get broker.github_api image)"
+        : "${gh_image:=gascity-broker-github-api:v1}"
+
+        local repo_allow
+        repo_allow="$(awk '
+            /^\[broker\.github_api\]/ {inside=1; next}
+            inside && /^\[/ {inside=0}
+            inside && /^[[:space:]]*repo_allowlist[[:space:]]*=/ {
+                sub(/^[^=]*=[[:space:]]*/, ""); print; exit
+            }
+        ' "$BROKER_CONFIG" 2>/dev/null \
+          | tr -d '[]" ' | tr ',' '\n' | grep -v '^$' | paste -sd, -)"
+
+        docker run -d --rm --name gc-broker-github-api \
+            --network gc-broker-net \
+            --user 1000:1000 --read-only \
+            --tmpfs /tmp:size=64m,mode=1777 \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --pids-limit 64 --memory 256m \
+            -e "GH_TOKEN=$gh_token_value" \
+            -e "REPO_ALLOWLIST=$repo_allow" \
+            "$gh_image" >/dev/null
+        docker network connect gc-egress-net gc-broker-github-api
+        echo "    ✓ gc-broker-github-api started"
+    else
+        echo "    ✓ gc-broker-github-api already running"
+    fi
+
+    # ---- GitHub-SSH broker ------------------------------------------------
+    if ! docker ps --format '{{.Names}}' | grep -qx gc-broker-github-ssh; then
+        local key_file kh_file ssh_image
+        key_file="$(toml_expand "$(toml_get broker.github_ssh key_file)")"
+        kh_file="$(toml_expand "$(toml_get broker.github_ssh known_hosts_file)")"
+        ssh_image="$(toml_get broker.github_ssh image)"
+        : "${key_file:=$HOME/.ssh/id_ed25519}"
+        : "${kh_file:=$HOME/.ssh/known_hosts}"
+        : "${ssh_image:=gascity-broker-github-ssh:v1}"
+
+        if [ ! -f "$key_file" ]; then
+            echo "${RED}    ✗ SSH key not found at $key_file${NC}" >&2
+            echo "${RED}      generate one (no passphrase recommended) or update broker.github_ssh.key_file in $BROKER_CONFIG${NC}" >&2
+            return 1
+        fi
+        if [ ! -f "$kh_file" ]; then
+            echo "${RED}    ✗ known_hosts not found at $kh_file${NC}" >&2
+            echo "${RED}      run: ssh-keyscan -H github.com >> $kh_file${NC}" >&2
+            return 1
+        fi
+
+        # Root + CHOWN cap so the entrypoint can chgrp the socket to gid
+        # 1000. Rootfs is --read-only and image carries no shells/curl/wget.
+        docker run -d --rm --name gc-broker-github-ssh \
+            --network gc-broker-net \
+            --user 0:0 --read-only \
+            --tmpfs /tmp:size=16m,mode=1777 \
+            --cap-drop ALL --cap-add CHOWN \
+            --security-opt no-new-privileges \
+            --pids-limit 32 --memory 64m \
+            -v "$key_file:/secrets/key:ro" \
+            -v "$kh_file:/secrets/known_hosts:ro" \
+            -v gc-sshagent-sock:/run/sshagent \
+            "$ssh_image" >/dev/null
+        docker network connect gc-egress-net gc-broker-github-ssh
+        echo "    ✓ gc-broker-github-ssh started"
+    else
+        echo "    ✓ gc-broker-github-ssh already running"
+    fi
+
+    # ---- Healthz wait -----------------------------------------------------
+    # The broker images carry no curl/wget per spec §6.3, so we use the
+    # /tmp/.healthy marker the proxies touch on startup.
+    for broker in gc-broker-anthropic gc-broker-github-api gc-broker-github-ssh; do
+        local healthy=0
+        for _ in $(seq 1 30); do
+            if docker exec "$broker" test -f /tmp/.healthy >/dev/null 2>&1; then
+                healthy=1; break
+            fi
+            sleep 0.5
+        done
+        if [ "$healthy" -eq 1 ]; then
+            echo "    ✓ $broker healthy"
+        else
+            echo "${RED}    ✗ $broker did not become healthy in 15s — see: docker logs $broker${NC}" >&2
+            return 1
+        fi
+    done
+}
+
 stop_supervisor_completely() {
     # 1. Ask gc supervisor to stop politely.
     if gc supervisor status 2>/dev/null | grep -q running; then
@@ -132,6 +332,12 @@ stop_supervisor_completely() {
     fi
 }
 stop_supervisor_completely
+
+# --- Step 1.5: bring up the v2 credential brokers --------------------------
+# Brokers must be up BEFORE the supervisor starts spawning agents — the
+# agent network has no internet egress, so an agent that races ahead of
+# the brokers will fail at DNS for ANTHROPIC_BASE_URL.
+ensure_brokers
 
 # --- Step 2: start gc supervisor with shim PATH in background --------------
 echo "${GREEN}→${NC} starting shim-aware supervisor"
