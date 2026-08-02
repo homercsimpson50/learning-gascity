@@ -162,8 +162,15 @@ async def proxy(request):
     )
 
     timeout = aiohttp.ClientTimeout(total=None, sock_connect=10, sock_read=None)
+    # auto_decompress=False so we pass the compressed body through
+    # UNCHANGED alongside its Content-Encoding header. If aiohttp
+    # decompressed and we forwarded the header, the client would see
+    # "Content-Encoding: gzip" on already-plaintext bytes and error
+    # with ZlibError. Client re-decompresses its end.
     try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with aiohttp.ClientSession(
+            timeout=timeout, auto_decompress=False
+        ) as session:
             async with session.request(
                 method, f"{UPSTREAM}{path}",
                 data=body if body else None,
