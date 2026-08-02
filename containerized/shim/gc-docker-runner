@@ -197,8 +197,20 @@ done
 # agent at the brokers on gc-broker-net. The agent has no other route
 # off the docker-internal network, so these URLs are the only way it
 # can reach Anthropic / GitHub at all.
+#
+# ANTHROPIC_API_KEY note: we inject a dummy value ON PURPOSE. Claude
+# Code's default auth flow tries OAuth first, which reaches out to
+# api.anthropic.com directly (bypassing ANTHROPIC_BASE_URL) and dies
+# on the container's --internal network with "ESERVFAIL". Setting
+# ANTHROPIC_API_KEY to any non-empty value flips the client into
+# API-key mode: it skips OAuth entirely and sends the API request to
+# ANTHROPIC_BASE_URL. The broker then strips whatever Authorization
+# header the client sent and injects the real OAuth bearer from
+# Keychain. So the dummy never leaves the container; the real token
+# is only ever in the broker's process memory.
 INJECT_ENV=(
     "ANTHROPIC_BASE_URL=http://gc-broker-anthropic:8080"
+    "ANTHROPIC_API_KEY=broker-managed-dummy-value-do-not-use"
     "GITHUB_API_URL=http://gc-broker-github-api:8080"
     "SSH_AUTH_SOCK=/run/sshagent/gc.sock"
     "GIT_SSH_COMMAND=ssh -F /etc/ssh/ssh_config_gc"
