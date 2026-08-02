@@ -1,0 +1,11 @@
+{
+  "_comment": "Baked into the agent-runner image at /home/agent/.claude/settings.json so fresh containers skip Claude Code's first-run onboarding (theme picker, project intro, etc.) that would otherwise block a headless polecats spawn. Keys were sourced from claude 2.1.220 binary strings.",
+  "hasCompletedOnboarding": true,
+  "hasCompletedProjectOnboarding": true,
+  "theme": "dark",
+  "customApiKeyResponses": {
+    "approved": [
+      "broker-managed-dummy-value-do-not-use"
+    ]
+  }
+}

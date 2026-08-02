@@ -66,6 +66,15 @@ RUN chmod +x /usr/local/bin/agent-entrypoint.sh
 COPY --chown=root:root ssh_config_gc /etc/ssh/ssh_config_gc
 RUN chmod 0644 /etc/ssh/ssh_config_gc
 
+# Pre-seed ~/.claude/settings.json so first-run onboarding (theme
+# picker, project intro, terms-accept) doesn't block a headless
+# polecats spawn. Keys sourced from strings-dig of the claude binary
+# (hasCompletedOnboarding, hasCompletedProjectOnboarding, theme).
+# Owned by agent so claude can extend it if it wants.
+RUN mkdir -p /home/agent/.claude && chown -R agent:agent /home/agent/.claude
+COPY --chown=agent:agent preseeded-claude-settings.json /home/agent/.claude/settings.json
+RUN chmod 0644 /home/agent/.claude/settings.json
+
 USER agent
 WORKDIR /work
 
