@@ -66,14 +66,26 @@ RUN chmod +x /usr/local/bin/agent-entrypoint.sh
 COPY --chown=root:root ssh_config_gc /etc/ssh/ssh_config_gc
 RUN chmod 0644 /etc/ssh/ssh_config_gc
 
-# Pre-seed ~/.claude/settings.json so first-run onboarding (theme
-# picker, project intro, terms-accept) doesn't block a headless
-# polecats spawn. Keys sourced from strings-dig of the claude binary
-# (hasCompletedOnboarding, hasCompletedProjectOnboarding, theme).
-# Owned by agent so claude can extend it if it wants.
+# Pre-seed BOTH claude config files so first-run onboarding doesn't
+# block a headless polecats spawn:
+#
+#   ~/.claude.json           — GLOBAL config. Claude Code checks
+#                              hasCompletedOnboarding HERE, not in
+#                              settings.json (the theme picker
+#                              rendered anyway when we only seeded
+#                              settings.json).
+#
+#   ~/.claude/settings.json  — per-project settings. Theme choice,
+#                              customApiKeyResponses.approved (so the
+#                              dummy API key doesn't prompt "unfamiliar
+#                              key" confirmation), any policy overrides.
+#
+# Both owned by agent so claude can extend them if it wants (writes
+# go to tmpfs since rootfs is --read-only).
 RUN mkdir -p /home/agent/.claude && chown -R agent:agent /home/agent/.claude
+COPY --chown=agent:agent preseeded-claude-global.json /home/agent/.claude.json
 COPY --chown=agent:agent preseeded-claude-settings.json /home/agent/.claude/settings.json
-RUN chmod 0644 /home/agent/.claude/settings.json
+RUN chmod 0644 /home/agent/.claude.json /home/agent/.claude/settings.json
 
 USER agent
 WORKDIR /work

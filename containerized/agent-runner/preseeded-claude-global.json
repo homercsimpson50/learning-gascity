@@ -1,0 +1,7 @@
+{
+  "_comment": "Baked into the agent-runner image at /home/agent/.claude.json (the GLOBAL config, distinct from ~/.claude/settings.json which is per-project). Claude Code checks hasCompletedOnboarding HERE — seeding it in settings.json was a red herring (theme picker still renders). Also seed numStartups and a stable userID so any first-run bookkeeping is satisfied.",
+  "hasCompletedOnboarding": true,
+  "numStartups": 1,
+  "userID": "gc-docker-broker-managed-agent",
+  "projects": {}
+}
