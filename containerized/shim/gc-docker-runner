@@ -230,7 +230,7 @@ exec_docker() {
         --interactive \
         $( [ -t 0 ] && echo --tty ) \
         "$IMAGE" \
-        "$AGENT_NAME" ${DOCKER_CLAUDE_ARGS[@]+"${DOCKER_CLAUDE_ARGS[@]}"} "$@"
+        "$AGENT_NAME" ${DOCKER_CLAUDE_ARGS[@]+"${DOCKER_CLAUDE_ARGS[@]}"} ${FILTERED_ARGS[@]+"${FILTERED_ARGS[@]}"}
 }
 
 # For the polecats path, the container is the security boundary — safe
@@ -240,6 +240,44 @@ DOCKER_CLAUDE_ARGS=()
 if [ "${GC_DOCKER_SKIP_PERMISSIONS:-1}" != "0" ] && [ "$AGENT_NAME" = "claude" ]; then
     DOCKER_CLAUDE_ARGS+=( --dangerously-skip-permissions )
 fi
+
+# gc-supervisor passes `--settings /path/on/host/.gc/settings.json` to
+# every claude invocation. That file contains gc-integration hooks
+# (PreCompact, SessionStart, UserPromptSubmit) whose commands invoke
+# the *host* `gc` binary — which isn't in the polecats container. The
+# host path also isn't visible in the container (only /work is mounted),
+# so claude aborts with "Settings file not found" before the hook
+# would even fire.
+#
+# Fix: rewrite --settings <host-path> to --settings '{}' (empty inline
+# JSON — --settings accepts either a file path or a JSON literal per
+# claude --help). Preserves the flag's shape without dragging in the
+# unusable file. Empty JSON = no hooks, no MCP servers, no policy —
+# the polecats agent's job is to work the bead, and gc's telemetry
+# hooks aren't needed for that.
+#
+# Any --settings value that DOESN'T look like a host path (already-
+# inline JSON, or a container-friendly /work/* path) passes through.
+FILTERED_ARGS=()
+_skip_next=0
+for _arg in "$@"; do
+    if [ "$_skip_next" = "1" ]; then
+        _skip_next=0
+        # Replace host-absolute paths with empty JSON; pass everything
+        # else (e.g. already a JSON literal, or /work/... in-container).
+        case "$_arg" in
+            /Users/*|/home/*|/tmp/*|/var/*|/opt/*|/private/*)
+                FILTERED_ARGS+=( '{}' ) ;;
+            *)
+                FILTERED_ARGS+=( "$_arg" ) ;;
+        esac
+        continue
+    fi
+    if [ "$_arg" = "--settings" ]; then
+        _skip_next=1
+    fi
+    FILTERED_ARGS+=( "$_arg" )
+done
 
 # --- Signal forwarding -----------------------------------------------------
 # Trap SIGTERM/SIGINT, ask docker to stop the container with a 10s grace,
