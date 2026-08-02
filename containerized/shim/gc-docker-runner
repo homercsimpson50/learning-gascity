@@ -129,14 +129,30 @@ LIM_CPU="$(toml_get limits cpus)";   : "${LIM_CPU:=2}"
 LIM_PIDS="$(toml_get limits pids_limit)"; : "${LIM_PIDS:=512}"
 TIMEOUT="$(toml_get limits timeout)"; : "${TIMEOUT:=30m}"
 
-# v2: the network is forced to gc-broker-net (--internal). This is the
-# whole isolation story — agents have no internet egress and reach
-# Anthropic / GitHub only via the brokers. We still read the legacy
-# [network] mode key so old configs don't blow up; we just warn if it
-# names something other than the v2 network.
+# v2 network policy (compromised — see KNOWN REGRESSION below):
+#
+# The original v2 design put agents on gc-broker-net (--internal, no
+# internet route), with brokers as the only egress. That WORKED in the
+# lab. In reality, Claude Code 2.1.x has hardcoded api.anthropic.com
+# calls (OAuth roles/session/telemetry) that bypass ANTHROPIC_BASE_URL
+# and dead-end on --internal DNS resolution — the agent prints
+# "Failed to connect to api.anthropic.com: ESERVFAIL" and aborts
+# before the first /v1/messages call.
+#
+# Interim fix: attach agents to gc-egress-net (bridge, has internet).
+# Brokers are on both networks so their container names still resolve.
+# The broker STILL intercepts /v1/messages (real OAuth bearer stays in
+# the broker, dummy ANTHROPIC_API_KEY in the container). What we lose
+# is egress isolation: an agent can now reach any public host.
+#
+# Follow-up (KNOWN REGRESSION): run broker on 443/HTTPS with a
+# self-signed cert claude trusts via NODE_EXTRA_CA_CERTS + docker
+# --add-host api.anthropic.com=<broker-ip>. Then agents can go back
+# on gc-broker-net --internal and the broker sees literally everything
+# claude asks for.
 LEGACY_NETWORK="$(toml_get network mode)"
-NETWORK="gc-broker-net"
-if [ -n "$LEGACY_NETWORK" ] && [ "$LEGACY_NETWORK" != "$NETWORK" ] && [ "$LEGACY_NETWORK" != "bridge" ]; then
+NETWORK="gc-egress-net"
+if [ -n "$LEGACY_NETWORK" ] && [ "$LEGACY_NETWORK" != "$NETWORK" ] && [ "$LEGACY_NETWORK" != "bridge" ] && [ "$LEGACY_NETWORK" != "gc-broker-net" ]; then
     echo "[gc-docker-runner] warn: [network] mode=$LEGACY_NETWORK is ignored under v2 (forced to $NETWORK)" >&2
 fi
 
