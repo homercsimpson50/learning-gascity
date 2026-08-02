@@ -28,6 +28,12 @@ ALLOWED_EXACT = {
     ("POST", "/v1/messages/count_tokens"),
     ("POST", "/v1/messages/batches"),
     ("GET", "/v1/models"),
+    # Claude Code startup connectivity ping — hits this before anything
+    # else and treats a non-2xx as "cannot reach Anthropic services",
+    # which aborts the whole boot. Not in the v2 spec; added after
+    # observing crash-loops on real polecats spawns (v2.1.220).
+    ("HEAD", "/api/hello"),
+    ("GET",  "/api/hello"),
 }
 ALLOWED_PREFIXES = (
     ("GET", "/v1/messages/batches/"),
