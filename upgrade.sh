@@ -46,19 +46,31 @@ ok "repo up to date ($(git rev-parse --short HEAD))"
 if command -v brew >/dev/null 2>&1; then
     if brew list --formula 2>/dev/null | grep -qx gascity; then
         say "Upgrading gc via Homebrew"
-        brew upgrade gastownhall/gascity/gascity 2>&1 | tail -3 || true
+        # Upstream tap prefix no longer required; formula is just `gascity`.
+        brew upgrade gascity 2>&1 | tail -3 || true
         ok "gc: $(gc version | head -1)"
+    elif command -v gc >/dev/null 2>&1; then
+        # gc is on PATH but not from brew (e.g. `go install ~/go/bin/gc`).
+        # Upgrade path is manual — just tell the operator; don't clobber.
+        warn "gc detected at $(command -v gc) but not installed via brew"
+        warn "  to switch to brew (recommended):"
+        warn "    rm -f ~/.local/bin/gc     # if symlinked here"
+        warn "    brew install gascity"
+        warn "  to stay on go install:"
+        warn "    GOBIN=~/go/bin go install github.com/gastownhall/gascity/cmd/gc@latest"
     fi
     if brew list --formula 2>/dev/null | grep -qx dolt; then
         say "Upgrading dolt via Homebrew"
+        # gc 1.4+ requires dolt ≥ 2.1.0; brew tracks upstream latest.
         brew upgrade dolt 2>&1 | tail -3 || true
         ok "dolt: $(dolt version | head -1)"
     fi
 fi
 
 # 3. bd via official install script (idempotent, replaces existing)
-say "Re-installing bd to pick up the latest"
-curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash 2>&1 | tail -3 || true
+say "Re-installing bd to pick up the latest (gc 1.4+ needs ≥ 1.0.4)"
+# Canonical URL is now gastownhall/beads; steveyegge/beads still works.
+curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash 2>&1 | tail -3 || true
 ok "bd: $(bd --version 2>/dev/null | head -1)"
 
 # 4. Containerized: rebuild image + re-install shim/wrapper

@@ -1,10 +1,23 @@
 # v2 broker rollout — current status
 
-**Last updated:** 2026-05-05 (commit `6d96fd8`).
+**Last updated:** 2026-08-01.
 **Spec:** [`credential-broker-v2-spec.md`](credential-broker-v2-spec.md).
-**Purpose of this file:** scratchpad so a fresh Claude / a second machine
+**Purpose of this file:** chronicle so a fresh Claude / a second machine
 can pick up the rollout without re-tracing the conversation. Delete it
 once v2 is fully validated end-to-end.
+
+## Chronicle
+
+- **2026-05-05** (`6d96fd8`): v2 broker implementation landed — three
+  brokers (anthropic / github-api / github-ssh), shim modified, verify
+  probes added. 14/14 A-F probes pass against real Anthropic + GitHub;
+  SSH broker blocked on user-provided `~/.ssh/id_gc_agent`.
+- **2026-08-01** (this update): host upgraded gc 1.0.1 → 1.4.0 (also
+  dolt 1.86.6 → 2.2.3, bd 1.0.3 → 1.1.2). See "gc 1.4 upgrade —
+  operator notes" section below. `wire-shim.sh` updated to handle 1.4's
+  `agents/<name>/agent.toml` layout in addition to legacy `[[agent]]`
+  blocks. SSH key generation still user's action (deliberate — no
+  auto-gen).
 
 ## What is built and merged
 
@@ -128,6 +141,36 @@ github_ssh. The default in `config.example.toml` is empty by intent
 5. `export GH_TOKEN=$(gh auth token)`.
 6. `gc-docker-start.sh`.
 7. `cd containerized && ./verify.sh`.
+
+## gc 1.4 upgrade — operator notes
+
+Landed on 2026-08-01. Full command-by-command recipe in the conversation
+transcript; abridged operator-facing summary:
+
+- **Install method changed on this host** from `go install` (`~/go/bin/gc`
+  symlinked to `~/.local/bin/gc`) to brew (`/opt/homebrew/bin/gc`). The
+  upstream tap prefix `brew install gastownhall/gascity/gascity` is gone
+  — the formula is now just `brew install gascity`. `bootstrap.sh` and
+  `upgrade.sh` in this repo have been updated to match.
+- **Version floors gc 1.4 enforces at start** (refuses to boot if not met):
+  `bd ≥ 1.0.4`, `dolt ≥ 2.1.0`. `upgrade.sh` bumps both.
+- **PackV1 gotcha**: cities created on ≤ 1.3 (with `[[agent]]` blocks in
+  `city.toml` / `pack.toml`) are hard-rejected on 1.4 — and one bad
+  city blocks `gc start` for *all* registered cities. Fix: `gc unregister
+  <stale-city>` or `gc doctor --fix` in the offender. `~/gc-docker` on
+  this host still has PackV1 blocks; it was unregistered and will
+  re-init cleanly on next `gc-workspace-work.sh`.
+- **Launchd plist drift**: after switching binary paths, the plist points
+  at the old binary. `gc supervisor install --force` rewrites it.
+- **Metrics is opt-out**: 1.4 introduced anonymous command-usage
+  metrics. First interactive `gc` after upgrade shows a disclosure.
+  Preempt with `gc metrics off` or `export DO_NOT_TRACK=1`.
+- **wire-shim.sh gap CLOSED**: previously walked only `[[agent]]` blocks
+  in pack.toml/city.toml (PackV1). Now also handles 1.4 layout —
+  patches `agents/<name>/agent.toml` at file root, skips rig-reference
+  files, ensures `agents/claude/agent.toml` exists as the polecat
+  override even if `agents/claude/` didn't exist. Tested against
+  synthetic 1.4 + PackV1 cities in isolation.
 
 ## Known follow-ups (out of scope for this rollout)
 

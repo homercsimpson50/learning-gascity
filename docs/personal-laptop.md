@@ -39,25 +39,27 @@ That's it. No Docker, no Homebrew yet (we'll install Brew if it's missing).
 # Homebrew if you don't have it
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 
-# gc, dolt, flock — all via brew
-brew install gastownhall/gascity/gascity dolt flock
+# gc, dolt, flock — all via brew (gc's upstream tap prefix no longer needed)
+brew install gascity dolt flock
 
 # bd (beads) — via the upstream install script
-curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+# (Canonical repo is gastownhall/beads; steveyegge/beads still works as a mirror.)
+curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
 ```
 
 Verify:
 
 ```bash
-gc version       # → 1.0.1
-bd --version     # → 1.0.3 or newer
-dolt version     # → 1.86.1 or newer
+gc version       # → 1.4.0 or newer
+bd --version     # → 1.0.4 or newer (gc 1.4+ hard-refuses older)
+dolt version     # → 2.1.0 or newer (gc 1.4+ requires this)
 ```
 
-> **bd version gotcha:** gascity v1.0.1 needs `bd` ≥ 1.0.3. Older `bd`
-> silently rejects gascity's custom issue types and the supervisor sits
-> in `reserved-unmaterialized`. If `bd --version` shows 1.0.0, re-run
-> the install script above.
+> **bd version floor:** gc 1.4+ prints
+> `missing required dependencies: bd (found vX, need v1.0.4+)` and
+> refuses to start on older bd. gc 1.0.x had the same requirement but
+> failed *silently* — mayor session stuck in `reserved-unmaterialized`.
+> If either shows up, re-run the bd install script above.
 
 ### 2. Initialize your city
 
@@ -192,9 +194,25 @@ After upgrade, restart the supervisor so the new `gc` is in charge:
 Run `gc doctor --fix`. Adds the `session` / `spec` / `convergence`
 custom bead types the city expects.
 
-**Mayor session shows `reserved-unmaterialized` and never starts**
-Almost always a `bd` version mismatch (need ≥ 1.0.3). Re-run the bd
-install script and `gc supervisor stop && gc start`.
+**`gc start` reports "missing required dependencies: bd (found vX, need v1.0.4+)"**
+Straightforward — upgrade bd: re-run the install script above, then
+`gc supervisor stop --wait && gc start`.
+
+**Mayor session shows `reserved-unmaterialized` and never starts (gc 1.0.x)**
+Silent-failure mode of the same bd version issue. gc 1.4+ turned this
+into the hard-check above; if you're seeing this, you're on gc 1.0.x —
+upgrade both gc and bd.
+
+**`gc start: PackV1 config surfaces are no longer supported` after upgrading to 1.4**
+Some registered city has pre-1.3 `[[agent]]` blocks in city.toml/pack.toml
+and blocks startup for *all* cities. Fix: `gc doctor --fix` inside the
+offender, or `gc unregister <stale-city>` if you don't need it (city
+files stay on disk).
+
+**"pending-notice" metrics prompt after upgrading to 1.4**
+1.4 introduced anonymous command-usage metrics; the first interactive
+`gc` command shows a disclosure. Preempt with `gc metrics off` or
+`export DO_NOT_TRACK=1` in your shell rc.
 
 **Workspace script can't find iTerm2 panes**
 The Python variant (`scripts/gascity-workspace.py`) needs iTerm2's

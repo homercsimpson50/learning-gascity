@@ -13,7 +13,7 @@ or test.
 
 Everything here is a wrapper on top of upstream binaries:
 
-- **`gc`** is installed via `brew install gastownhall/gascity/gascity` (host) or pulled in during the agent image build.
+- **`gc`** is installed via `brew install gascity` (host) or pulled in during the agent image build.
 - **`bd`** is installed via the official Steve Yegge install script.
 - **Claude Code** in the agent image is installed via `npm install -g @anthropic-ai/claude-code`.
 
@@ -162,12 +162,19 @@ the personal-laptop path.
 non-interactively scaffold + register + bring up the city in one shot.
 Local `gc` names the provider `claude`, not `claude-code`.
 
-**bd version gotcha**: gascity v1.0.1 expects `bd` ≥ 1.0.3. Older `bd`
-(1.0.0) silently rejects the city's custom issue types (`session`, `agent`,
-`molecule`, etc.) with `validation failed for issue : invalid issue type:
-session`, which surfaces as the supervisor's mayor session staying in
-`reserved-unmaterialized`. Fix: re-run the `bd` install script
-(`curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash`).
+**bd version floor**: gc 1.4+ hard-refuses to start on `bd < 1.0.4`
+("missing required dependencies: bd (found vX, need v1.0.4+)"). gc 1.0.x
+had the same requirement but failed silently — old `bd` accepted the
+city's custom issue types (`session`, `agent`, `molecule`, etc.) at
+config-load and rejected creates at runtime with `validation failed for
+issue : invalid issue type: session`, surfacing as the mayor session
+stuck in `reserved-unmaterialized` forever. Fix on any version — re-run
+the bd install script (canonical URL is now `gastownhall/beads`; the
+old `steveyegge/beads` mirror still works):
+
+```
+curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
+```
 
 ### iTerm2 workspace layouts (`scripts/`)
 

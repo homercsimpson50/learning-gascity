@@ -63,11 +63,12 @@ fi
 if command -v gc >/dev/null 2>&1; then
     ok "gc present ($(gc version 2>/dev/null | head -1))"
 else
-    say "Installing gc via Homebrew tap gastownhall/gascity"
+    say "Installing gc via Homebrew"
     if [ "$(uname)" != Darwin ]; then
         die "gc auto-install is macOS-only. On Linux, build from source: https://github.com/gastownhall/gascity"
     fi
-    brew install gastownhall/gascity/gascity
+    # Upstream tap no longer required — the formula is just `gascity` now.
+    brew install gascity
     ok "gc installed: $(gc version | head -1)"
 fi
 
@@ -78,7 +79,9 @@ if command -v bd >/dev/null 2>&1; then
     ok "bd present ($(bd --version 2>/dev/null | head -1))"
 else
     say "Installing bd via the official install script"
-    curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+    # Canonical repo is gastownhall/beads now; the steveyegge/beads
+    # URL still works as a mirror. gc 1.4+ requires bd ≥ 1.0.4.
+    curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
     ok "bd installed: $(bd --version 2>/dev/null | head -1)"
 fi
 

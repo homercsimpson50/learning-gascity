@@ -47,7 +47,7 @@ cd ~/code/learning-gascity
 
 1. Verifies git + docker are present.
 2. Installs Homebrew if missing (macOS).
-3. `brew install gastownhall/gascity/gascity` (skips if `gc` already on PATH).
+3. `brew install gascity` (skips if `gc` already on PATH). *(Upstream tap prefix no longer required as of 1.4.)*
 4. The official `bd` install script (skips if `bd` already on PATH).
 5. `brew install dolt flock` (gc's beads-provider deps).
 6. Hands off to `containerized/install.sh`, which:
@@ -173,7 +173,56 @@ claude --continue                   # your normal claude, untouched
 What this **doesn't** give you — be honest about the limit:
 
 - **Not a hard boundary against a deliberately malicious model.** Docker on macOS uses a shared kernel via the Linux VM; a kernel-level escape compromises the host. The eventual answer for that threat model is k8s + gVisor + NetworkPolicy ([spec §10](containerizing-gascity-for-local-use-spec.md#10-migration-path-to-option-b-k8s-on-work-machine--eks)).
-- **No egress allowlist in v1.** The container uses Docker's default bridge with full internet reachability. Spec §6 outlines the dnsmasq + iptables solution for v2.
+- **v2 credential brokers now handle Anthropic + GitHub auth without host secrets in the agent container.** See "Auth setup" below. The v1 forwarding of `ANTHROPIC_API_KEY` / `GH_TOKEN` env vars is gone.
+- **Agent-side egress is broker-only.** Agent containers sit on `gc-broker-net` which is `--internal` (no route off Docker's private network). Direct connects from the agent to `api.anthropic.com`, `api.github.com`, or `github.com:22` fail at DNS. All auth traffic flows through the broker sidecars.
+
+---
+
+## Auth setup (v2 credential brokers)
+
+Three sidecar containers hold credentials so agents authenticate without
+those credentials being present in the agent container at all. Overview
+in [`docs/credential-broker-v2-spec.md`](credential-broker-v2-spec.md);
+current rollout state + test results in
+[`docs/credential-broker-v2-status.md`](credential-broker-v2-status.md).
+
+Before `gc-workspace-work.sh` will bring the brokers up cleanly, do
+this one-time setup:
+
+```bash
+# 1. Generate an UNENCRYPTED SSH key dedicated to the agent broker.
+#    (Broker refuses passphrase-protected keys — it can't prompt.)
+ssh-keygen -t ed25519 -f ~/.ssh/id_gc_agent -N ""
+gh ssh-key add ~/.ssh/id_gc_agent.pub --title "gc-broker"
+
+# 2. Point the broker at that key. Edit ~/.config/gascity-docker-runner/config.toml
+#    (the file is created by ./bootstrap.sh / containerized/install.sh):
+#        [broker.github_ssh]
+#        key_file = "~/.ssh/id_gc_agent"
+#    and set the repo allowlist for both API + SSH brokers:
+#        [broker.github_api]
+#        repo_allowlist = ["yourhandle/*", "yourorg/some-repo"]
+#        [broker.github_ssh]
+#        repo_allowlist = ["yourhandle/*", "yourorg/some-repo"]
+
+# 3. Ensure GH_TOKEN is exported in the shell that runs gc-workspace-work.sh
+echo 'export GH_TOKEN="$(gh auth token)"' >> ~/.zshrc
+export GH_TOKEN="$(gh auth token)"
+
+# 4. First time only: verify the Anthropic OAuth token extractor works
+#    (on macOS the OAuth lives in Keychain, not a flat file; the extractor
+#    pulls it out atomically to a mode-0600 file the broker mounts).
+gc-broker-creds-extract.sh
+```
+
+After that, `gc-workspace-work.sh` extracts creds → starts the three
+brokers → starts the shim-aware supervisor.
+
+**Note on cities upgraded from ≤ 1.3:** if `~/gc-docker/` predates gc
+1.4, it may contain `[[agent]]` PackV1 blocks that 1.4 rejects at
+startup. Cleanest fix: `rm -rf ~/gc-docker` and let
+`gc-workspace-work.sh` re-init on next run. `wire-shim.sh` handles the
+new `agents/<name>/agent.toml` layout automatically.
 
 ---
 
@@ -199,7 +248,7 @@ gc-workspace-work.sh         # picks up the new supervisor + reopens workspace
 What `upgrade.sh` does, in order:
 
 1. `git pull --ff-only` on this repo (stops if you have uncommitted changes).
-2. `brew upgrade gastownhall/gascity/gascity` (if `gc` was installed via brew).
+2. `brew upgrade gascity` (if `gc` was installed via brew; upstream tap prefix no longer needed).
 3. `brew upgrade dolt`.
 4. Re-runs the upstream `bd` install script — replaces `bd` with the latest.
 5. Rebuilds `gascity-agent-runner:claude` with `--no-cache` (so the
