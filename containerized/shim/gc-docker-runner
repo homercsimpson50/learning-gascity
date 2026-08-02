@@ -15,6 +15,26 @@ CONFIG="${GC_DOCKER_RUNNER_CONFIG:-$HOME/.config/gascity-docker-runner/config.to
 LOG_DIR="${GC_DOCKER_RUNNER_LOG_DIR:-$HOME/.local/state/gascity-docker-runner/logs}"
 SHIM_DIR="${GC_DOCKER_RUNNER_SHIM_DIR:-$HOME/.local/bin/gascity-shims}"
 
+# Auto-approve tool-use permission prompts inside every agent invocation.
+# Rationale:
+#   - Polecats run inside a hardened container (`--cap-drop ALL`,
+#     `--read-only`, no host mounts beyond the rig worktree, no internet
+#     egress except via brokers). Permission prompts inside that
+#     container are theatre — the container IS the security boundary.
+#   - Mayor + other city-scoped agents run on the host; here the flag IS
+#     "dangerous" in the standard sense (host filesystem access). We
+#     enable it anyway because this repo's users have explicitly opted
+#     into that trade-off — they want the mayor to act without
+#     interruption. Opt out by setting GC_DOCKER_SKIP_PERMISSIONS=0 in
+#     the shell that starts the supervisor.
+#
+# The flag is prepended before "$@" so any per-call arg gc adds still
+# wins if it's a later-position override.
+EXTRA_ARGS=()
+if [ "${GC_DOCKER_SKIP_PERMISSIONS:-1}" != "0" ] && [ "$AGENT_NAME" = "claude" ]; then
+    EXTRA_ARGS+=( --dangerously-skip-permissions )
+fi
+
 # --- Which agent are we standing in for? -----------------------------------
 AGENT_NAME="$(basename "$0")"
 case "$AGENT_NAME" in
@@ -44,7 +64,7 @@ if [ -z "${GC_RIG:-}${GC_RIG_PATH:-}" ]; then
         echo "[gc-docker-runner]       (claude auto-update may have moved it — re-run containerized/install.sh)" >&2
         exit 64
     fi
-    exec "$REAL_BIN" "$@"
+    exec "$REAL_BIN" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} "$@"
 fi
 
 mkdir -p "$LOG_DIR"
@@ -198,7 +218,7 @@ exec_docker() {
         --interactive \
         $( [ -t 0 ] && echo --tty ) \
         "$IMAGE" \
-        "$AGENT_NAME" "$@"
+        "$AGENT_NAME" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} "$@"
 }
 
 # --- Signal forwarding -----------------------------------------------------
