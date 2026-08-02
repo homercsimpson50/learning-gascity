@@ -106,9 +106,12 @@ toml_get() {
     ' "$file" 2>/dev/null
 }
 toml_expand() {
-    # Expand a leading ~ to $HOME.
+    # Expand a leading ~ to $HOME. NOTE: pattern in ${1#PATTERN} must have
+    # ~ escaped (\~) — otherwise bash tilde-expands the pattern to $HOME
+    # BEFORE matching, which never matches a literal '~' and leaves the
+    # tilde in place. Result was paths like /Users/homer/~/.ssh/id_gc_agent.
     case "$1" in
-        '~/'*) printf '%s\n' "$HOME/${1#~/}" ;;
+        '~/'*) printf '%s\n' "$HOME/${1#\~/}" ;;
         '~')   printf '%s\n' "$HOME" ;;
         *)     printf '%s\n' "$1" ;;
     esac
@@ -169,7 +172,7 @@ ensure_brokers() {
                 sub(/^[^=]*=[[:space:]]*/, ""); print; exit
             }
         ' "$BROKER_CONFIG" 2>/dev/null \
-          | tr -d '[]" ' | tr ',' '\n' | grep -v '^$' | paste -sd, -)"
+          | tr -d '[]" ' | tr ',' '\n' | grep -v '^$' | paste -sd, - || true)"
 
         docker run -d --rm --name gc-broker-anthropic \
             --network gc-broker-net \
@@ -210,7 +213,7 @@ ensure_brokers() {
                 sub(/^[^=]*=[[:space:]]*/, ""); print; exit
             }
         ' "$BROKER_CONFIG" 2>/dev/null \
-          | tr -d '[]" ' | tr ',' '\n' | grep -v '^$' | paste -sd, -)"
+          | tr -d '[]" ' | tr ',' '\n' | grep -v '^$' | paste -sd, - || true)"
 
         docker run -d --rm --name gc-broker-github-api \
             --network gc-broker-net \
