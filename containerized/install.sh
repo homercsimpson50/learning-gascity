@@ -140,6 +140,16 @@ else
     ok "Existing config preserved at $CONFIG_DIR/config.toml"
 fi
 
+# Mayor permission allowlist — curated allow list for the host-side
+# claude the mayor runs. Preserved across reinstalls so user tweaks
+# stick. See ../configs/mayor-permissions.json for the shipped version.
+if [ ! -f "$CONFIG_DIR/mayor-permissions.json" ]; then
+    cp ../configs/mayor-permissions.json "$CONFIG_DIR/mayor-permissions.json"
+    ok "Mayor permissions allowlist written to $CONFIG_DIR/mayor-permissions.json"
+else
+    ok "Existing mayor permissions preserved at $CONFIG_DIR/mayor-permissions.json"
+fi
+
 # ---------------------------------------------------------------------------
 # 5. claude symlink + real-claude sidecar
 #
