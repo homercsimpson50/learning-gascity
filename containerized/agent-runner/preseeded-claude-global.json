@@ -1,7 +1,13 @@
 {
-  "_comment": "Baked into the agent-runner image at /home/agent/.claude.json (the GLOBAL config, distinct from ~/.claude/settings.json which is per-project). Claude Code checks hasCompletedOnboarding HERE — seeding it in settings.json was a red herring (theme picker still renders). Also seed numStartups and a stable userID so any first-run bookkeeping is satisfied.",
+  "_comment": "Baked into the agent-runner image at /home/agent/.claude.json (the GLOBAL config, distinct from ~/.claude/settings.json which is per-project). Claude Code checks hasCompletedOnboarding HERE — settings.json was a red herring for that. projects[/work].hasTrustDialogAccepted skips the 'is this a project you trust?' gate that fires when claude first cd's into /work (the rig worktree bind-mount). --dangerously-skip-permissions doesn't suppress that dialog; only pre-accepting via projects[] does.",
   "hasCompletedOnboarding": true,
   "numStartups": 1,
   "userID": "gc-docker-broker-managed-agent",
-  "projects": {}
+  "projects": {
+    "/work": {
+      "hasTrustDialogAccepted": true,
+      "hasCompletedProjectOnboarding": true,
+      "allowedTools": []
+    }
+  }
 }
